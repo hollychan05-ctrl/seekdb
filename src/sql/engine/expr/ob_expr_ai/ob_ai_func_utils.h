@@ -379,6 +379,10 @@ public:
   static bool is_valid_prompt_object(ObJsonObject* prompt_object);
   static int replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str);
   static int construct_prompt_object(ObIAllocator &allocator, ObString &template_str, ObJsonArray *args_array, ObJsonObject *&prompt_object);
+  // resolve a single placeholder argument to its textual replacement.
+  // string -> the string itself; nested prompt object -> rendered recursively;
+  // any other json value -> its serialized json text.
+  static int resolve_arg_text(ObIAllocator &allocator, ObJsonNode *arg_node, ObString &arg_text);
   static constexpr char prompt_template_key[20] = "template";
   static constexpr char prompt_args_key[20] = "args";
 private:
