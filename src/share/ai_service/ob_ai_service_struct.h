@@ -49,6 +49,9 @@ public:
     request_transform_fn_.reset();
     response_transform_fn_.reset();
     endpoint_id_ = OB_INVALID_ID;
+    // 0 means "not configured": the caller keeps whatever concurrency limit the
+    // transport layer uses by default.
+    max_concurrency_ = DEFAULT_MAX_CONCURRENCY;
   }
 
   int parse_from_json_base(common::ObArenaAllocator &allocator,const ObString &name, const common::ObIJsonBase &params_jbase);
@@ -69,6 +72,8 @@ public:
   const ObString &get_response_transform_fn() const { return response_transform_fn_; }
   uint64_t get_endpoint_id() const { return endpoint_id_; }
   void set_endpoint_id(uint64_t endpoint_id) { endpoint_id_ = endpoint_id; }
+  int64_t get_max_concurrency() const { return max_concurrency_; }
+  void set_max_concurrency(const int64_t max_concurrency) { max_concurrency_ = max_concurrency; }
 
   TO_STRING_KV(K_(name),
                K_(scope),
@@ -80,7 +85,14 @@ public:
                K_(request_model_name),
                K_(parameters),
                K_(request_transform_fn),
-               K_(response_transform_fn));
+               K_(response_transform_fn),
+               K_(max_concurrency));
+  // A concurrency limit is optional. When it is not configured the stored value
+  // is DEFAULT_MAX_CONCURRENCY, which is not a valid explicit value: users may
+  // only ask for a limit in [MIN_MAX_CONCURRENCY, MAX_MAX_CONCURRENCY].
+  static constexpr int64_t DEFAULT_MAX_CONCURRENCY = 0;
+  static constexpr int64_t MIN_MAX_CONCURRENCY = 1;
+  static constexpr int64_t MAX_MAX_CONCURRENCY = 1024;
 private:
   static const ObString DEFAULT_SCOPE;
   static bool is_valid_provider(const ObString &provider);
@@ -98,6 +110,7 @@ private:
   ObString parameters_;
   ObString request_transform_fn_;
   ObString response_transform_fn_;
+  int64_t max_concurrency_;
 };
 
 } // namespace share
