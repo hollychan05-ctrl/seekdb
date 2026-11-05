@@ -392,8 +392,10 @@ int ObFTParseHelper::segment(
       doc_length = add_word.get_add_word_count();
     }
   }
+  // the document body is deliberately not logged: this runs once per document
+  // and echoing the whole text into the log is expensive.
   LOG_DEBUG("ft parse segment", K(ret), K(type), K(add_word_flag_), K(parser_name_),
-      K(ObString(fulltext_len, fulltext)), K(words.size()));
+      K(fulltext_len), K(words.size()));
   return ret;
 }
 
