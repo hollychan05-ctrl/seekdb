@@ -37,8 +37,17 @@ const char *VALID_PROVIDERS[] = {
   "SILICONFLOW",
   "COHERE",
   "HUNYUAN-OPENAI",
-  "OPENAI"
+  "OPENAI",
+  "OLLAMA"
 };
+
+// Providers that are usually reached on the local network and authenticate by
+// network location instead of an api key, so an empty access_key is allowed.
+// The comparison is case insensitive, matching is_valid_provider().
+static bool is_access_key_optional_provider(const ObString &provider)
+{
+  return provider.case_compare("OLLAMA") == 0;
+}
 
 #define EXTRACT_JSON_ELEM_STR(json_key, member) \
   EXTRACT_JSON_ELEM_STR_WITH_PROCESS(json_key, member, "void")
@@ -112,7 +121,7 @@ int ObAiModelEndpointInfo::check_valid() const
   } else if (url_.empty()) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("url"), "url");
-  } else if (access_key_.empty()) {
+  } else if (access_key_.empty() && !is_access_key_optional_provider(provider_)) {
     ret = OB_AI_FUNC_PARAM_EMPTY;
     LOG_USER_ERROR(OB_AI_FUNC_PARAM_EMPTY, strlen("access_key"), "access_key");
     LOG_WARN("access_key is empty", K(ret), K(*this));

@@ -63,7 +63,7 @@ several inputs" requirement, assert that a scan of N rows produced one entry wit
 | rerank results not sorted by the provider | `{"rerank_reverse":true}` |
 | rerank result missing `index` | `{"rerank_drop_index":true}` |
 | rerank returns an out-of-range index | `{"rerank_extra_result":true}` |
-| ollama streams by default (real behaviour) | `{"ollama_real_stream_default":true}` |
+| ollama must not stream (real behaviour: absent `stream` means streaming) | default; relax with `{"ollama_lenient_stream":true}` |
 
 ### Registering the mock as an endpoint
 

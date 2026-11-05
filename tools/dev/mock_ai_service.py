@@ -59,7 +59,7 @@ CONTROL_KEYS = (
     "rerank_drop_index",
     "rerank_extra_result",
     "rerank_top_n_only",
-    "ollama_real_stream_default",
+    "ollama_lenient_stream",
 )
 
 
@@ -281,9 +281,13 @@ class Handler(BaseHTTPRequestHandler):
         )
 
         if shape == "ollama_complete":
-            if self.state.fault_value("complete_stream") or (
-                self.state.fault_value("ollama_real_stream_default") and body.get("stream") is None
-            ):
+            # real ollama streams unless the request explicitly asks for stream:false,
+            # so a missing field is treated as streaming here as well. Set
+            # {"ollama_lenient_stream":true} if you are testing something else.
+            stream = body.get("stream")
+            if stream is None:
+                stream = not self.state.fault_value("ollama_lenient_stream")
+            if self.state.fault_value("complete_stream") or stream:
                 # real ollama streams by default: newline delimited json chunks
                 payload = b"".join(
                     json.dumps({"model": model, "response": chunk, "done": done}).encode() + b"\n"
