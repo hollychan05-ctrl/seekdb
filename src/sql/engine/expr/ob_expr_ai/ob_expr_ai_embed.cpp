@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_ENG
 #include "ob_expr_ai_embed.h"
+#include "sql/engine/expr/ob_expr_lob_utils.h"
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
 
@@ -100,9 +101,13 @@ int ObExprAIEmbed::eval_ai_embed(const ObExpr &expr, ObEvalCtx &ctx, ObDatum &re
     const share::ObAiModelEndpointInfo *endpoint_info = &resolved_endpoint;
     query::ObIAiEndpointResolver *endpoint_resolver =
         ::oceanbase::share::server_service<::oceanbase::query::ObIAiEndpointResolver>();
-    ObString model_id = arg_model_id->get_string();
-    ObString content = arg_content->get_string();
-    if (model_id.empty() || content.empty()) {
+    ObString model_id;
+    ObString content;
+    if (OB_FAIL(ObTextStringHelper::get_string(ctx.exec_ctx_, expr, temp_allocator,
+                                               MODEL_IDX, arg_model_id, model_id))) {
+    } else if (OB_FAIL(ObTextStringHelper::get_string(ctx.exec_ctx_, expr, temp_allocator,
+                                                      CONTENT_IDX, arg_content, content))) {
+    } else if (model_id.empty() || content.empty()) {
       ret = OB_INVALID_ARGUMENT;
       LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id or input is empty");
       res.set_null();
@@ -196,15 +201,27 @@ int ObExprAIEmbed::eval_ai_embed_batch(const ObExpr &expr, ObEvalCtx &ctx,
           }
         }
         if (OB_SUCC(ret)) {
-          ObString model_id = model_datum->get_string();
-          if (0 == row_ids.count()) {
-            batch_model_id = model_id;
-            batch_dim = dim;
-          } else if (batch_dim != dim || batch_model_id != model_id) {
-            same_target = false;
-          }
-          if (OB_FAIL(row_ids.push_back(j))) {
-          } else if (OB_FAIL(row_contents.push_back(content_datum->get_string()))) {
+          ObString model_id;
+          ObString content_str;
+          if (OB_FAIL(ObTextStringHelper::get_string(ctx.exec_ctx_, expr, temp_allocator,
+                                                     MODEL_IDX, model_datum, model_id))) {
+          } else if (OB_FAIL(ObTextStringHelper::get_string(ctx.exec_ctx_, expr, temp_allocator,
+                                                            CONTENT_IDX, content_datum, content_str))) {
+          } else if (model_id.empty() || content_str.empty()) {
+            // an empty model id or input cannot be sent to the service
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_embed, model id or input is empty");
+            res_datum.at(j)->set_null();
+          } else {
+            if (0 == row_ids.count()) {
+              batch_model_id = model_id;
+              batch_dim = dim;
+            } else if (batch_dim != dim || batch_model_id != model_id) {
+              same_target = false;
+            }
+            if (OB_FAIL(row_ids.push_back(j))) {
+            } else if (OB_FAIL(row_contents.push_back(content_str))) {
+            }
           }
         }
       }
