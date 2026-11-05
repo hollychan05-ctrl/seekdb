@@ -40,6 +40,15 @@ static int ob_set_ollama_non_stream(ObIAllocator &allocator, ObJsonObject *body)
   return ret;
 }
 
+// the answer of a completion must be a non empty json string: an empty answer
+// means the call did not really succeed and must not be returned as a value.
+static bool ob_is_valid_completion_result(ObIJsonBase *node)
+{
+  return OB_NOT_NULL(node)
+      && node->json_type() == ObJsonNodeType::J_STRING
+      && !static_cast<ObJsonString *>(node)->get_str().empty();
+}
+
 // an embedding vector element must be a json number
 static bool ob_is_embedding_element_type(const ObJsonNodeType type)
 {
@@ -197,7 +206,7 @@ int ObOpenAIUtils::ObOpenAIComplete::parse_output(common::ObIAllocator &allocato
     ObJsonSeekResult hit;
     if (OB_FAIL(j_path.parse_path())) {
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
-    } else if (hit.size() == 0) {
+    } else if (hit.size() == 0 || !ob_is_valid_completion_result(hit[0])) {
       ret = OB_INVALID_DATA;
     } else {
       result = hit[0];
@@ -374,8 +383,8 @@ int ObOllamaUtils::ObOllamaComplete::parse_output(common::ObIAllocator &allocato
     ObJsonSeekResult hit;
     if (OB_FAIL(j_path.parse_path())) {
     } else if (OB_FAIL(j_tree->seek(j_path, j_path.path_node_cnt(), false, false, hit))) {
-    } else if (hit.size() == 0) {
-      ret = OB_ERR_UNEXPECTED;
+    } else if (hit.size() == 0 || !ob_is_valid_completion_result(hit[0])) {
+      ret = OB_INVALID_DATA;
     } else {
       result = hit[0];
     }
@@ -560,6 +569,7 @@ int ObDashscopeUtils::ObDashscopeComplete::parse_output(ObIAllocator &allocator,
     ObJsonObject *choice_obj = nullptr;
     ObJsonObject *message_obj = nullptr;
     ObJsonString *content_str = nullptr;
+    ObJsonNode *content_node = nullptr;
     ObString response_str;
     if (OB_ISNULL(output_obj = static_cast<ObJsonObject *>(http_response->get_value("output")))) {
       ret = OB_INVALID_DATA;
@@ -569,8 +579,11 @@ int ObDashscopeUtils::ObDashscopeComplete::parse_output(ObIAllocator &allocator,
       ret = OB_INVALID_DATA;
     } else if (OB_ISNULL(message_obj = static_cast<ObJsonObject *>(choice_obj->get_value("message")))) {
       ret = OB_INVALID_DATA;
-    } else if (OB_ISNULL(content_str = static_cast<ObJsonString *>(message_obj->get_value("content")))) {
+    } else if (OB_ISNULL(content_node = message_obj->get_value("content"))) {
       ret = OB_INVALID_DATA;
+    } else if (!ob_is_valid_completion_result(content_node)) {
+      ret = OB_INVALID_DATA;
+    } else if (OB_FALSE_IT(content_str = static_cast<ObJsonString *>(content_node))) {
     } else {
       result = content_str;
     }
