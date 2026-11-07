@@ -76,6 +76,7 @@ struct ObFileTableMeta
 struct ObFileRowValue
 {
   ObFileRowValue() : text_(), is_null_(false) {}
+  void reset() { text_.reset(); is_null_ = false; }
   common::ObString text_;
   bool is_null_;
 };
@@ -185,7 +186,6 @@ public:
 private:
   int refill();
   int read_field(common::ObIAllocator &alloc, ObFileRowValue &value, bool &row_end);
-  int read_line_into_buffer();
 
   int fd_;
   bool is_inited_;
@@ -195,6 +195,9 @@ private:
   common::ObString buffer_;   // unparsed tail of the file
   int64_t pos_;               // read position inside buffer_
   char *io_buf_;              // fixed size read buffer
+  int64_t column_count_;      // number of columns the caller asked for
+  bool skip_header_;          // drop the first logical row
+  bool header_consumed_;
 };
 
 // A newline delimited json file opened for reading. Every line is parsed into an
@@ -209,7 +212,13 @@ public:
            const common::ObString &path,
            const common::ObSEArray<ObFileColumnDef, 16> &columns);
   int get_next_row(common::ObIAllocator &alloc, ObFileRow &row);
+  // Read the next non-empty physical line. Used by both the scan and the schema
+  // inference. Returns OB_ITER_END at the end of the file.
+  int next_line(common::ObIAllocator &alloc, common::ObString &line);
   void close();
+
+private:
+  int refill();
 
 private:
   int fd_;
@@ -218,6 +227,7 @@ private:
   common::ObString buffer_;
   int64_t pos_;
   char *io_buf_;
+  common::ObSEArray<common::ObString, 16> col_names_;
 };
 
 } // namespace sql
