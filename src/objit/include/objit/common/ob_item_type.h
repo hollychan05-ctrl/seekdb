@@ -1131,6 +1131,10 @@ typedef enum ObItemType
   T_DIAGNOSTICS = 3461,
   T_JSON_TABLE_EXPRESSION = 3462,
   T_JSON_TABLE_COLUMN = 3463,
+  // a file table function in the FROM clause: read_csv / read_json / read_parquet / glob
+  T_FILE_TABLE_EXPRESSION = 3450,
+  // one "name = value" argument of a file table function
+  T_FILE_TABLE_ARG = 3451,
   //pseudo_column
   T_PSEUDO_COLUMN = 3464,
   T_LEVEL = 3465,

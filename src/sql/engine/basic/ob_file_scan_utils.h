@@ -105,6 +105,25 @@ struct ObFileTableArgs
   common::ObString nullstr_;
 };
 
+// The definition of one file exposed as a table, produced by the resolver after
+// it has inferred the columns and consumed by the scan operator. Both sides use
+// it so they can never disagree about the schema.
+struct ObFileTableDef
+{
+  ObFileTableDef()
+      : kind_(0), file_path_(), format_(), args_(), has_header_(true), row_count_(0), columns_()
+  {}
+  // 1 read_csv, 2 read_json, 3 read_parquet, 4 glob
+  int64_t kind_;
+  common::ObString file_path_;
+  common::ObString format_;
+  ObFileTableArgs args_;
+  bool has_header_;
+  int64_t row_count_;
+  common::ObSEArray<ObFileColumnDef, 16> columns_;
+  TO_STRING_KV(K_(kind), K_(file_path), K_(format), K_(has_header), K_(row_count), K(columns_.count()));
+};
+
 // Reading a local file as a table.
 //
 // Nothing here knows about plans or operators: the resolver calls infer_*() to
