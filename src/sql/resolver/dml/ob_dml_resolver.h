@@ -210,6 +210,7 @@ public:
   int resolve_file_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
   int gen_file_table_column_items(const ObFileTableDef &def, TableItem &table_item);
+  int materialize_file_values(const ObFileTableDef &def, ObValuesTableDef &values_def);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);
   int create_unnest_table_item(TableItem *&table_item, ObString table_name);
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);

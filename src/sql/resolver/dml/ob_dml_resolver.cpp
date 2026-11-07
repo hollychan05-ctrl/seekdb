@@ -3934,19 +3934,95 @@ int ObDMLResolver::resolve_json_table_item(const ParseNode &parse_tree, TableIte
   return ret;
 }
 
-// The OceanBase type a file column is exposed as.
-static common::ObObjType file_sql_column_obj_type(const ObFileColumnType type)
+// The result type a file column exposes. It has to match the datum the reader
+// produced, because the values table copies cells with from_obj() and does not
+// cast between types.
+static int file_sql_column_res_type(const ObFileColumnType type, ObRawExprResType &res_type)
 {
-  common::ObObjType obj_type = common::ObVarcharType;
+  int ret = OB_SUCCESS;
+  ObObjType obj_type = ObVarcharType;
+  ObAccuracy accuracy;
   switch (type) {
-    case ObFileColumnType::BOOLEAN:  obj_type = common::ObTinyIntType; break;
-    case ObFileColumnType::BIGINT:   obj_type = common::ObIntType; break;
-    case ObFileColumnType::DOUBLE:   obj_type = common::ObDoubleType; break;
-    case ObFileColumnType::DATE:     obj_type = common::ObDateType; break;
-    case ObFileColumnType::DATETIME: obj_type = common::ObDateTimeType; break;
-    default:                         obj_type = common::ObVarcharType; break;
+    case ObFileColumnType::BOOLEAN:  obj_type = ObTinyIntType; break;
+    case ObFileColumnType::BIGINT:   obj_type = ObIntType; break;
+    case ObFileColumnType::DOUBLE:   obj_type = ObDoubleType; break;
+    case ObFileColumnType::DATE:     obj_type = ObDateType; break;
+    case ObFileColumnType::DATETIME: obj_type = ObDateTimeType; break;
+    default:                         obj_type = ObVarcharType; break;
   }
-  return obj_type;
+  if (ObVarcharType == obj_type) {
+    accuracy.set_length(4096);
+  }
+  res_type.set_type(obj_type);
+  res_type.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+  res_type.set_accuracy(accuracy);
+  return ret;
+}
+
+// Append one materialised file row to a values table. Every field is converted
+// from the text the reader produced into the typed object the schema inference
+// chose for that column; strings are copied because the reader reuses its buffer
+// on the next read.
+static int append_file_row(ObIAllocator &alloc,
+                           const ObFileTableDef &def,
+                           ObFileRow &row,
+                           ObValuesTableDef &values_def)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < def.columns_.count(); ++i) {
+    const ObFileColumnDef &col = def.columns_.at(i);
+    const bool missing = (i >= row.count() || row.at(i).is_null_);
+    bool is_null = missing;
+    int64_t int_value = 0;
+    double double_value = 0.0;
+    ObString str_value;
+    if (!missing && OB_FAIL(ObFileScanUtils::convert_field(alloc, col.type_, row.at(i).text_,
+                                                          is_null, int_value, double_value,
+                                                          str_value))) {
+    }
+    ObObjParam cell;
+    if (OB_FAIL(ret)) {
+    } else if (is_null) {
+      cell.set_null();
+    } else if (ObFileColumnType::BOOLEAN == col.type_ || ObFileColumnType::BIGINT == col.type_) {
+      cell.set_int(int_value);
+    } else if (ObFileColumnType::DOUBLE == col.type_) {
+      cell.set_double(double_value);
+    } else if (ObFileColumnType::DATE == col.type_) {
+      int32_t days = 0;
+      bool ok = false;
+      if (OB_FAIL(ObFileScanUtils::parse_date(row.at(i).text_, days, ok))) {
+      } else if (ok) {
+        cell.set_date(days);
+      } else {
+        cell.set_null();
+      }
+    } else if (ObFileColumnType::DATETIME == col.type_) {
+      int64_t usec = 0;
+      bool ok = false;
+      if (OB_FAIL(ObFileScanUtils::parse_datetime(row.at(i).text_, usec, ok))) {
+      } else if (ok) {
+        cell.set_datetime(usec);
+      } else {
+        cell.set_null();
+      }
+    } else {
+      char *buf = static_cast<char *>(alloc.alloc(str_value.length()));
+      if (OB_ISNULL(buf) && str_value.length() > 0) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        if (str_value.length() > 0) {
+          MEMCPY(buf, str_value.ptr(), str_value.length());
+        }
+        ObString copy(str_value.length(), buf);
+        cell.set_varchar(copy);
+        cell.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(values_def.access_objs_.push_back(cell))) {
+    }
+  }
+  return ret;
 }
 
 // read_csv / read_json / read_parquet / glob: a local file used as a table.
@@ -4124,13 +4200,141 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
     }
   }
 
+  // The file is materialised into a values table: the existing in-memory row
+  // source. Reusing it means the file rows go through the normal planner, so
+  // filtering, aggregation, sorting and joins over a file table need no bespoke
+  // scan operator -- only the resolver has to learn how to build one.
+  ObFileTableDef *file_def = NULL;
+  ObValuesTableDef *values_def = NULL;
+  TableItem *item = NULL;
+  if (OB_FAIL(ret)) {
+  } else {
+    void *buf = allocator_->alloc(sizeof(ObFileTableDef));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      file_def = new (buf) ObFileTableDef();
+      file_def->kind_ = kind;
+      file_def->file_path_ = file_path;
+      file_def->args_ = args;
+      file_def->has_header_ = meta.has_header_;
+      file_def->row_count_ = meta.row_count_;
+      for (int64_t i = 0; OB_SUCC(ret) && i < meta.columns_.count(); ++i) {
+        if (OB_FAIL(file_def->columns_.push_back(meta.columns_.at(i)))) {
+        }
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
-    // The scan operator is not implemented yet. The schema has been inferred and
-    // the arguments validated above, but a file table must not reach the planner
-    // while there is no file table access path, so the statement fails cleanly
-    // here instead of taking the observer down in an unhandled plan stage.
+    void *buf = allocator_->alloc(sizeof(ObValuesTableDef));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      values_def = new (buf) ObValuesTableDef();
+      if (OB_FAIL(materialize_file_values(*file_def, *values_def))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObString table_name;
+    ParseNode *alias_node = (4 == parse_tree.num_child_) ? parse_tree.children_[3] : NULL;
+    if (NULL != alias_node && NULL != alias_node->str_value_) {
+      table_name.assign_ptr(alias_node->str_value_, alias_node->str_len_);
+    }
+    if (OB_ISNULL(item = stmt->create_table_item(*allocator_))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+      LOG_ERROR("create table item failed", K(ret));
+    } else if (table_name.empty() &&
+               OB_FAIL(stmt->generate_values_table_name(*allocator_, table_name))) {
+    } else {
+      item->table_id_ = generate_table_id();
+      item->table_name_ = table_name;
+      item->alias_name_ = table_name;
+      item->type_ = TableItem::VALUES_TABLE;
+      item->is_view_table_ = false;
+      item->file_table_def_ = file_def;
+      item->values_table_def_ = values_def;
+      if (OB_FAIL(stmt->add_table_item(session_info_, item))) {
+      } else if (OB_FAIL(gen_file_table_column_items(*file_def, *item))) {
+      } else {
+        tbl_item = item;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDMLResolver::materialize_file_values(const ObFileTableDef &def,
+                                           ObValuesTableDef &values_def)
+{
+  int ret = OB_SUCCESS;
+  values_def.access_type_ = ObValuesTableDef::ACCESS_OBJ;
+  values_def.column_cnt_ = def.columns_.count();
+  values_def.row_cnt_ = 0;
+  if (OB_ISNULL(allocator_) || OB_ISNULL(session_info_)) {
+    ret = OB_NOT_INIT;
+  } else if (def.columns_.count() <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("a file table with no column", K(ret));
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < def.columns_.count(); ++i) {
+    ObRawExprResType res_type;
+    if (OB_FAIL(file_sql_column_res_type(def.columns_.at(i).type_, res_type))) {
+    } else if (OB_FAIL(values_def.column_types_.push_back(res_type))) {
+    }
+  }
+  if (OB_FAIL(ret)) {
+  } else if (4 == def.kind_) {
+    // glob: a single "file" column, one row per matching path
+    ObSEArray<ObString, 16> files;
+    if (OB_FAIL(ObFileScanUtils::glob_files(*allocator_, def.file_path_, files))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < files.count(); ++i) {
+        ObObjParam cell;
+        cell.set_varchar(files.at(i));
+        cell.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+        if (OB_FAIL(values_def.access_objs_.push_back(cell))) {
+        }
+      }
+      values_def.row_cnt_ = files.count();
+    }
+  } else if (1 == def.kind_ || 2 == def.kind_) {
+    ObFileRow row;
+    if (1 == def.kind_) {
+      ObFileCsvReader reader;
+      if (OB_FAIL(reader.open(*allocator_, def.file_path_, def.args_, def.columns_))) {
+      } else {
+        while (OB_SUCC(ret)) {
+          ret = reader.get_next_row(*allocator_, row);
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+          } else if (OB_SUCC(ret) && OB_FAIL(append_file_row(*allocator_, def, row, values_def))) {
+          }
+        }
+      }
+      reader.close();
+    } else {
+      ObFileJsonReader reader;
+      if (OB_FAIL(reader.open(*allocator_, def.file_path_, def.columns_))) {
+      } else {
+        while (OB_SUCC(ret)) {
+          ret = reader.get_next_row(*allocator_, row);
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+          } else if (OB_SUCC(ret) && OB_FAIL(append_file_row(*allocator_, def, row, values_def))) {
+          }
+        }
+      }
+      reader.close();
+    }
+    if (OB_SUCC(ret) && values_def.column_cnt_ > 0) {
+      values_def.row_cnt_ = values_def.access_objs_.count() / values_def.column_cnt_;
+    }
+  } else {
     ret = OB_NOT_SUPPORTED;
-    LOG_USER_ERROR(OB_NOT_SUPPORTED, "scanning a file table");
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "this file table function");
+  }
+  if (OB_SUCC(ret) && OB_FAIL(estimate_values_table_stats(values_def))) {
   }
   return ret;
 }
@@ -4140,8 +4344,13 @@ int ObDMLResolver::gen_file_table_column_items(const ObFileTableDef &def, TableI
   int ret = OB_SUCCESS;
   ObDMLStmt *stmt = get_stmt();
   common::ObCollationType cs_type = common::CS_TYPE_UTF8MB4_GENERAL_CI;
-  if (OB_ISNULL(stmt) || OB_ISNULL(allocator_) || OB_ISNULL(params_.expr_factory_)) {
+  ObValuesTableDef *values_def = table_item.values_table_def_;
+  if (OB_ISNULL(stmt) || OB_ISNULL(allocator_) || OB_ISNULL(params_.expr_factory_) ||
+      OB_ISNULL(values_def)) {
     ret = OB_NOT_INIT;
+  } else if (OB_UNLIKELY(values_def->column_types_.count() != def.columns_.count())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("file column type count mismatch", K(ret));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < def.columns_.count(); ++i) {
       const ObFileColumnDef &col = def.columns_.at(i);
@@ -4150,7 +4359,7 @@ int ObDMLResolver::gen_file_table_column_items(const ObFileTableDef &def, TableI
       } else if (OB_ISNULL(column_expr)) {
         ret = OB_ERR_UNEXPECTED;
       } else {
-        column_expr->set_data_type(file_sql_column_obj_type(col.type_));
+        column_expr->set_result_type(values_def->column_types_.at(i));
         column_expr->set_collation_type(cs_type);
         column_expr->set_column_attr(table_item.table_name_, col.name_);
         column_expr->set_ref_id(table_item.table_id_, i + OB_APP_MIN_COLUMN_ID);
