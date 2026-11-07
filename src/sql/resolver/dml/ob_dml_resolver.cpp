@@ -4308,6 +4308,7 @@ int ObDMLResolver::materialize_file_values(const ObFileTableDef &def,
           ret = reader.get_next_row(*allocator_, row);
           if (OB_ITER_END == ret) {
             ret = OB_SUCCESS;
+            break;
           } else if (OB_SUCC(ret) && OB_FAIL(append_file_row(*allocator_, def, row, values_def))) {
           }
         }
@@ -4321,6 +4322,7 @@ int ObDMLResolver::materialize_file_values(const ObFileTableDef &def,
           ret = reader.get_next_row(*allocator_, row);
           if (OB_ITER_END == ret) {
             ret = OB_SUCCESS;
+            break;
           } else if (OB_SUCC(ret) && OB_FAIL(append_file_row(*allocator_, def, row, values_def))) {
           }
         }
