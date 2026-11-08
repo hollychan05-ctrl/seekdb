@@ -1830,7 +1830,6 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
   int64_t num_rows = 0;
   int64_t total_rows = 0;
   State *state = NULL;
-  LOG_ERROR("PQRDBG", K(columns.count()));
   if (opened_) {
     ret = OB_INIT_TWICE;
   } else if (OB_ISNULL(state = static_cast<State *>(alloc.alloc(sizeof(State))))) {
@@ -2089,9 +2088,6 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
       }
       if (OB_FAIL(ret)) {
       }
-      LOG_ERROR("PARQUETDBG", K(ret), K(c), K(page_type), K(page_num_values), K(page_encoding),
-                K(def_len), K(rep_len), K(values_compressed), K(page_len), K(dp),
-                K(static_cast<int64_t>(def_levels.count())), K(state->cols_.at(c).repetition_));
       // plain values
       const int32_t physical = state->cols_.at(c).physical_type_;
       for (int64_t i = 0; OB_SUCC(ret) && i < page_num_values; ++i) {
@@ -2099,7 +2095,6 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
         if (1 == state->cols_.at(c).repetition_) {
           is_null = (i >= def_levels.count() || 0 == def_levels.at(i));
         }
-        char num[32];
         ObString text;
         if (is_null) {
           text = ObString();
@@ -2110,34 +2105,35 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
             const bool b = (0 != ((byte >> (i % 8)) & 1));
             text = ObString::make_string(b ? "1" : "0");
           }
-        } else if (1 == physical) {  // int32
-          if (dp + 4 > page_len) { ret = OB_INVALID_DATA; }
-          else {
-            int32_t v = 0;
-            MEMCPY(&v, page + dp, 4);
-            dp += 4;
-            const int n = ::snprintf(num, sizeof(num), "%d", static_cast<int>(v));
-            text.assign_ptr(num, static_cast<ObString::obstr_size_t>(n));
-          }
-        } else if (2 == physical) {  // int64
-          if (dp + 8 > page_len) { ret = OB_INVALID_DATA; }
-          else {
-            int64_t v = 0;
-            MEMCPY(&v, page + dp, 8);
-            dp += 8;
-            const int n = ::snprintf(num, sizeof(num), "%ld", static_cast<long>(v));
-            text.assign_ptr(num, static_cast<ObString::obstr_size_t>(n));
-          }
-        } else if (4 == physical || 5 == physical) {  // float / double
-          const int sz = (4 == physical) ? 4 : 8;
-          if (dp + sz > page_len) { ret = OB_INVALID_DATA; }
-          else {
-            double d = 0.0;
-            if (4 == physical) { float f = 0.0f; MEMCPY(&f, page + dp, 4); d = f; }
-            else { MEMCPY(&d, page + dp, 8); }
-            dp += sz;
-            const int n = ::snprintf(num, sizeof(num), "%.17g", d);
-            text.assign_ptr(num, static_cast<ObString::obstr_size_t>(n));
+        } else if (1 == physical || 2 == physical || 4 == physical || 5 == physical) {
+          // The text outlives this loop, so it must be copied into the allocator;
+          // a stack buffer would leave the stored value pointing at dead memory.
+          const int sz = (1 == physical) ? 4 : ((2 == physical) ? 8 : ((4 == physical) ? 4 : 8));
+          if (dp + sz > page_len) {
+            ret = OB_INVALID_DATA;
+          } else {
+            char *buf = static_cast<char *>(alloc.alloc(32));
+            if (OB_ISNULL(buf)) {
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            } else {
+              int n = 0;
+              if (1 == physical) {
+                int32_t v = 0;
+                MEMCPY(&v, page + dp, 4);
+                n = ::snprintf(buf, 32, "%d", static_cast<int>(v));
+              } else if (2 == physical) {
+                int64_t v = 0;
+                MEMCPY(&v, page + dp, 8);
+                n = ::snprintf(buf, 32, "%ld", static_cast<long>(v));
+              } else {
+                double d = 0.0;
+                if (4 == physical) { float f = 0.0f; MEMCPY(&f, page + dp, 4); d = f; }
+                else { MEMCPY(&d, page + dp, 8); }
+                n = ::snprintf(buf, 32, "%.17g", d);
+              }
+              dp += sz;
+              text.assign_ptr(buf, static_cast<ObString::obstr_size_t>(n));
+            }
           }
         } else {  // byte_array
           if (dp + 4 > page_len) { ret = OB_INVALID_DATA; }

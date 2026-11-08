@@ -4305,7 +4305,6 @@ int ObDMLResolver::materialize_file_values(const ObFileTableDef &def,
                                            ObValuesTableDef &values_def)
 {
   int ret = OB_SUCCESS;
-  LOG_ERROR("FILEDBG", K(def.kind_), K(def.columns_.count()), K(def.row_count_));
   values_def.access_type_ = ObValuesTableDef::ACCESS_OBJ;
   values_def.column_cnt_ = def.columns_.count();
   values_def.row_cnt_ = 0;
