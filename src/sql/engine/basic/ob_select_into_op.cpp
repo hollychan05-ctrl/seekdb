@@ -36,8 +36,8 @@ namespace sql
 
 OB_SERIALIZE_MEMBER(ObSelectIntoOpInput, task_id_, sqc_id_);
 OB_SERIALIZE_MEMBER((ObSelectIntoSpec, ObOpSpec), into_type_, user_vars_, outfile_name_,
-    field_str_, line_str_, closed_cht_, is_optional_, select_exprs_, is_single_, max_file_size_,
-    escaped_cht_, cs_type_, parallel_, buffer_size_, is_overwrite_,
+    field_str_, line_str_, closed_cht_, is_optional_, select_exprs_, column_names_, is_single_,
+    max_file_size_, escaped_cht_, cs_type_, parallel_, buffer_size_, is_overwrite_,
     external_properties_);
 
 
@@ -50,6 +50,7 @@ int ObSelectIntoOp::inner_open()
   } else {
     // since we call get_next_row in inner_open, we have to set opened_ first in avoid to a infinite loop.
     opened_ = true;
+    header_done_ = false;
     if (OB_FAIL(session->get_sql_select_limit(top_limit_cnt_))) {
     }
   }
@@ -997,6 +998,16 @@ int ObSelectIntoOp::into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFil
     } else if (OB_FAIL(datum_vectors.push_back(select_exprs.at(i)->locate_expr_datumvector(eval_ctx_)))) {
     }
   }
+  if (OB_SUCC(ret) && !header_done_ && external_properties_.csv_format_.parse_header_
+      && MY_SPEC.column_names_.count() > 0) {
+    if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(write_csv_header(*csv_data_writer))) {
+    } else if (OB_FAIL(csv_data_writer->flush_shared_buf(shared_buf_))) {
+    } else {
+      header_done_ = true;
+    }
+  }
   for (int64_t i = 0; OB_SUCC(ret) && i < brs.size_; ++i) {
     if (brs.skip_->contain(i)) {
       // do nothing
@@ -1033,6 +1044,23 @@ int ObSelectIntoOp::into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFil
         OZ(csv_data_writer->flush_buf());
       }
     }
+  }
+  return ret;
+}
+
+int ObSelectIntoOp::write_csv_header(ObCsvFileWriter &data_writer)
+{
+  int ret = OB_SUCCESS;
+  ObObj name;
+  for (int64_t i = 0; OB_SUCC(ret) && i < MY_SPEC.column_names_.count(); ++i) {
+    name.set_varchar(MY_SPEC.column_names_.at(i));
+    name.set_collation_type(cs_type_);
+    if (OB_FAIL(print_field(name, data_writer))) {
+    } else if (i != MY_SPEC.column_names_.count() - 1
+               && OB_FAIL(write_obj_to_file(field_str_, data_writer))) {
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(write_obj_to_file(line_str_, data_writer))) {
   }
   return ret;
 }

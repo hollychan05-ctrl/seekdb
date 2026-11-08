@@ -385,7 +385,7 @@ END_P SET_VAR DELIMITER
 %type <node> date_unit date_params timestamp_params
 %type <node> drop_table_stmt table_list drop_view_stmt table_or_tables
 %type <node> explain_stmt explainable_stmt format_name kill_stmt create_outline_stmt alter_outline_stmt drop_outline_stmt opt_outline_target
-%type <node> expr_list expr expr_const conf_const simple_expr simple_expr_list expr_or_default bit_expr bool_pri predicate explain_or_desc pl_expr_stmt
+%type <node> expr_list expr expr_const conf_const simple_expr simple_expr_list expr_or_default bit_expr bool_pri predicate explain_or_desc pl_expr_stmt copy_stmt copy_options_opt copy_option_list copy_option
 %type <node> column_ref multi_delete_table
 %type <node> case_expr func_expr in_expr sub_query_flag search_expr
 %type <node> case_arg when_clause_list when_clause case_default
@@ -584,6 +584,7 @@ stmt:
   | drop_table_stmt         { $$ = $1; check_question_mark($$, result); }
   | drop_view_stmt          { $$ = $1; check_question_mark($$, result); }
   | explain_stmt            { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | create_outline_stmt     { $$ = $1; question_mark_issue($$, result); }
   | alter_outline_stmt      { $$ = $1; question_mark_issue($$, result); }
   | drop_outline_stmt       { $$ = $1; check_question_mark($$, result); }
@@ -8902,6 +8903,76 @@ LIMIT limit_expr OFFSET limit_expr
   // setup_token_pos_info($$, @1.first_column - 1, @4.last_column - @1.first_column + 1);
   check_ret(setup_token_pos_info_and_dup_string($$, result, @1.first_column, @4.last_column),
             &@1, result);
+}
+;
+
+/* COPY (query) TO 'file' (format csv, header, nullstr 'NULL'): DuckDB style.
+   It is the same statement as SELECT ... INTO OUTFILE, with the CSV type and a
+   header forced on so that read_csv can read the file back. The trailing option
+   list is accepted but ignored. */
+copy_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE copy_options_opt
+{
+  ParseNode *type_name = NULL;
+  ParseNode *type_node = NULL;
+  ParseNode *header_val = NULL;
+  ParseNode *header_node = NULL;
+  ParseNode *option_list = NULL;
+  ParseNode *format_list = NULL;
+  ParseNode *into_node = NULL;
+  if (NULL != $3 && NULL != $3->children_ && $3->num_child_ > PARSE_SELECT_INTO
+      && NULL == $3->children_[PARSE_SELECT_INTO]) {
+    make_name_node(type_name, result->malloc_pool_, "csv");
+    malloc_non_terminal_node(type_node, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, type_name);
+    malloc_terminal_node(header_val, result->malloc_pool_, T_INT);
+    header_val->value_ = 1;
+    malloc_non_terminal_node(header_node, result->malloc_pool_, T_PARSE_HEADER, 1, header_val);
+    malloc_non_terminal_node(option_list, result->malloc_pool_, T_LINK_NODE, 2, type_node, header_node);
+    merge_nodes(format_list, result, T_EXTERNAL_FILE_FORMAT, option_list);
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
+    $3->children_[PARSE_SELECT_INTO] = into_node;
+  }
+  $$ = $3;
+}
+;
+
+copy_options_opt:
+{
+  $$ = NULL;
+}
+| '(' copy_option_list ')'
+{
+  $$ = NULL;
+}
+;
+
+copy_option_list:
+copy_option
+{
+  $$ = NULL;
+}
+| copy_option_list ',' copy_option
+{
+  $$ = NULL;
+}
+;
+
+copy_option:
+NAME_OB
+{
+  $$ = NULL;
+}
+| FORMAT NAME_OB
+{
+  $$ = NULL;
+}
+| NAME_OB STRING_VALUE
+{
+  $$ = NULL;
+}
+| FORMAT NAME_OB STRING_VALUE
+{
+  $$ = NULL;
 }
 ;
 
