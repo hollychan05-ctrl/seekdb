@@ -5478,12 +5478,10 @@ int ObStaticEngineCG::generate_spec(ObLogSelectInto &op, ObSelectIntoSpec &spec,
       } else if (OB_FAIL(spec.select_exprs_.push_back(rt_expr))) {
       }
     }
-    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_select_exprs().count(); ++i) {
+    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_column_names().count(); ++i) {
       ObString name;
-      const ObRawExpr *select_expr = op.get_select_exprs().at(i);
-      if (OB_ISNULL(select_expr)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(ob_write_string(alloc, select_expr->get_expr_name(), name))) {
+      // the planner kept the names; they do not survive on the raw exprs
+      if (OB_FAIL(ob_write_string(alloc, op.get_column_names().at(i), name))) {
       } else if (OB_FAIL(spec.column_names_.push_back(name))) {
       }
     }

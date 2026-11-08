@@ -166,6 +166,8 @@ public:
   }
   const common::ObIArray<ObRawExpr*> &get_select_exprs() const { return select_exprs_; }
   common::ObIArray<ObRawExpr*> &get_select_exprs() { return select_exprs_; }
+  const common::ObIArray<common::ObString> &get_column_names() const { return column_names_; }
+  common::ObIArray<common::ObString> &get_column_names() { return column_names_; }
   virtual int est_cost() override;
   virtual int compute_plan_type() override;
   virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
@@ -178,6 +180,8 @@ private:
   common::ObObj field_str_;
   common::ObObj line_str_;
   common::ObSEArray<ObRawExpr*, 8, common::ModulePageAllocator, true> select_exprs_;
+  // the output column names, so the file writer can emit a csv header
+  common::ObSEArray<common::ObString, 8, common::ModulePageAllocator, true> column_names_;
   common::ObSEArray<common::ObString, 16, common::ModulePageAllocator, true> user_vars_;
   common::ObObj closed_cht_;
   bool is_optional_;
