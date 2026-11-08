@@ -4095,6 +4095,9 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
       // The argument value is a literal, so it can be read straight from the
       // parse node. An integer literal is a T_NUMBER here (T_INT is only used
       // inside some statements) and a bare "true"/"false" arrives as a word.
+      // Work out both possible readings of the literal and let the argument pick.
+      // An integer literal keeps its digits in str_value_ as well, so a plain
+      // "is there a string" test would mistake it for one.
       bool is_int = false;
       bool is_str = false;
       int64_t int_val = 0;
@@ -4105,32 +4108,37 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
         neg = true;
         num_node = num_node->children_[0];
       }
-      if (NULL != num_node && (T_INT == num_node->type_ || T_NUMBER == num_node->type_
-                               || T_UNUMBER == num_node->type_ || T_BOOL == num_node->type_)) {
-        is_int = true;
-        int_val = neg ? -num_node->value_ : num_node->value_;
-      } else if (NULL != val_node && NULL != val_node->str_value_) {
+      if (NULL != val_node && NULL != val_node->str_value_) {
         is_str = true;
         str_val.assign_ptr(val_node->str_value_, val_node->str_len_);
-      } else if (NULL != val_node && NULL != val_node->raw_text_ && 0 == val_node->num_child_) {
-        ObString txt(val_node->text_len_, val_node->raw_text_);
+      }
+      if (NULL != num_node && 0 == num_node->num_child_
+          && (T_INT == num_node->type_ || T_NUMBER == num_node->type_
+              || T_UNUMBER == num_node->type_ || T_BOOL == num_node->type_)) {
+        is_int = true;
+        int_val = neg ? -num_node->value_ : num_node->value_;
+      } else {
+        ObString txt;
+        if (is_str) {
+          txt = str_val;
+        } else if (NULL != val_node && NULL != val_node->raw_text_) {
+          txt.assign_ptr(val_node->raw_text_, val_node->text_len_);
+        }
         if (0 == txt.case_compare("true")) {
           is_int = true;
           int_val = 1;
         } else if (0 == txt.case_compare("false")) {
           is_int = true;
           int_val = 0;
-        } else {
+        } else if (txt.length() > 0 && txt.length() < 32) {
           char buf[32];
-          if (txt.length() > 0 && txt.length() < static_cast<int64_t>(sizeof(buf))) {
-            MEMCPY(buf, txt.ptr(), txt.length());
-            buf[txt.length()] = '\0';
-            char *end = NULL;
-            const long long v = ::strtoll(buf, &end, 10);
-            if (NULL != end && '\0' == *end && end != buf) {
-              is_int = true;
-              int_val = v;
-            }
+          MEMCPY(buf, txt.ptr(), txt.length());
+          buf[txt.length()] = '\0';
+          char *end = NULL;
+          const long long v = ::strtoll(buf, &end, 10);
+          if (NULL != end && '\0' == *end && end != buf) {
+            is_int = true;
+            int_val = neg ? -v : v;
           }
         }
       }

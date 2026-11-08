@@ -2088,6 +2088,9 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
       }
       if (OB_FAIL(ret)) {
       }
+      LOG_WARN("PARQUETDBG", K(ret), K(c), K(page_type), K(page_num_values), K(page_encoding),
+               K(def_len), K(rep_len), K(values_compressed), K(page_len), K(dp),
+               K(static_cast<int64_t>(def_levels.count())), K(state->cols_.at(c).repetition_));
       // plain values
       const int32_t physical = state->cols_.at(c).physical_type_;
       for (int64_t i = 0; OB_SUCC(ret) && i < page_num_values; ++i) {
