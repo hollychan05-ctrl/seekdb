@@ -2061,7 +2061,9 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
                 uint8_t v = 0;
                 for (int w = 0; w < width; ++w) {
                   const int64_t abs_bit = bit_off + w;
-                  const uint8_t byte = static_cast<uint8_t>(lvl[abs_bit / 8]);
+                  // the run header has already been consumed, so the packed bytes
+                  // start at lp
+                  const uint8_t byte = static_cast<uint8_t>(lvl[lp + abs_bit / 8]);
                   v |= ((byte >> (abs_bit % 8)) & 1) << w;
                 }
                 if (OB_FAIL(def_levels.push_back(v))) {
@@ -2156,14 +2158,6 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
             state->cells_.at(idx) = text;
           }
         }
-      }
-      {
-        int64_t non_empty = 0;
-        for (int64_t k = 0; k < state->cells_.count(); ++k) {
-          if (!state->cells_.at(k).empty()) { ++non_empty; }
-        }
-        LOG_ERROR("PQV", K(page_num_values), K(static_cast<int64_t>(def_levels.count())),
-                  K(static_cast<int64_t>(state->cells_.count())), K(non_empty), K(page_len), K(dp));
       }
       row_base += rows_per_group;
     }
