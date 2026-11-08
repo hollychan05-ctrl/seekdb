@@ -2157,6 +2157,14 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
           }
         }
       }
+      {
+        int64_t non_empty = 0;
+        for (int64_t k = 0; k < state->cells_.count(); ++k) {
+          if (!state->cells_.at(k).empty()) { ++non_empty; }
+        }
+        LOG_ERROR("PQV", K(page_num_values), K(static_cast<int64_t>(def_levels.count())),
+                  K(static_cast<int64_t>(state->cells_.count())), K(non_empty), K(page_len), K(dp));
+      }
       row_base += rows_per_group;
     }
   }
