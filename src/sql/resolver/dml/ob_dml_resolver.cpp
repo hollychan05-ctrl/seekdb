@@ -4413,6 +4413,11 @@ int ObDMLResolver::gen_file_table_column_items(const ObFileTableDef &def, TableI
         ret = OB_ERR_UNEXPECTED;
       } else {
         column_expr->set_result_type(values_def->column_types_.at(i));
+        if (!col.nullable_) {
+          // remember that the reader saw no null for this column, so DESCRIBE
+          // can report it as NOT NULL
+          column_expr->set_result_flag(NOT_NULL_FLAG);
+        }
         column_expr->set_collation_type(cs_type);
         column_expr->set_column_attr(table_item.table_name_, col.name_);
         column_expr->set_ref_id(table_item.table_id_, i + OB_APP_MIN_COLUMN_ID);

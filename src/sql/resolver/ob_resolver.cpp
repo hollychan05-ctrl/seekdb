@@ -91,6 +91,7 @@
 #include "sql/resolver/ddl/ob_purge_resolver.h"
 #include "sql/resolver/ddl/ob_set_comment_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_wrap_enum_set.h"
+#include "sql/engine/basic/ob_file_scan_utils.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
 #include "sql/pl/ob_pl_package.h"
@@ -133,6 +134,207 @@ int ObResolver::select_stmt_resolver_func(ObResolverParams &params, const ParseN
     if (OB_FAIL(SMART_CALL(stmt_resolver.resolve(parse_tree)))) {
     }
     stmt = stmt_resolver.get_basic_stmt();
+  }
+  return ret;
+}
+
+namespace {
+// The type names DESCRIBE reports, matching what a file reader inferred.
+const char *describe_file_type_name(const ObFileColumnType type)
+{
+  switch (type) {
+    case ObFileColumnType::BOOLEAN:  return "BOOLEAN";
+    case ObFileColumnType::BIGINT:   return "BIGINT";
+    case ObFileColumnType::DOUBLE:   return "DOUBLE";
+    case ObFileColumnType::DATE:     return "DATE";
+    case ObFileColumnType::DATETIME: return "DATETIME";
+    default:                         return "VARCHAR";
+  }
+}
+
+const char *describe_obj_type_name(const ObObjType type)
+{
+  switch (type) {
+    case ObTinyIntType:
+    case ObUTinyIntType:  return "TINYINT";
+    case ObIntType:
+    case ObInt64Type:     return "BIGINT";
+    case ObInt32Type:     return "INTEGER";
+    case ObUInt64Type:    return "UBIGINT";
+    case ObUInt32Type:    return "UINTEGER";
+    case ObFloatType:     return "FLOAT";
+    case ObDoubleType:    return "DOUBLE";
+    case ObDateType:      return "DATE";
+    case ObDateTimeType:  return "DATETIME";
+    default:              return "VARCHAR";
+  }
+}
+
+int describe_push_varchar(ObValuesTableDef &def, ObIAllocator &alloc, const ObString &text)
+{
+  int ret = OB_SUCCESS;
+  ObObjParam cell;
+  if (text.empty()) {
+    cell.set_varchar(ObString());
+    cell.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+  } else {
+    char *buf = static_cast<char *>(alloc.alloc(text.length()));
+    if (OB_ISNULL(buf)) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      MEMCPY(buf, text.ptr(), text.length());
+      cell.set_varchar(ObString(text.length(), buf));
+      cell.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(def.access_objs_.push_back(cell))) {
+  }
+  return ret;
+}
+
+int describe_push_const(ObValuesTableDef &def, const char *text)
+{
+  int ret = OB_SUCCESS;
+  ObObjParam cell;
+  cell.set_varchar(ObString::make_string(text));
+  cell.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+  if (OB_FAIL(def.access_objs_.push_back(cell))) {
+  }
+  return ret;
+}
+
+int describe_push_null(ObValuesTableDef &def)
+{
+  int ret = OB_SUCCESS;
+  ObObjParam cell;
+  cell.set_null();
+  if (OB_FAIL(def.access_objs_.push_back(cell))) {
+  }
+  return ret;
+}
+}  // namespace
+
+// DESCRIBE <select>: resolve the query to learn the columns it would produce,
+// then answer with one row per column. The answer is built as a select over a
+// values table, which is the same shape a file table is materialised into, so
+// no new operator or executor is needed.
+int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&stmt)
+{
+  int ret = OB_SUCCESS;
+  static const int64_t COLUMN_CNT = 6;
+  static const char *const DESCRIBE_COLUMN_NAMES[COLUMN_CNT] =
+      {"column_name", "column_type", "null", "key", "default", "extra"};
+  stmt = NULL;
+  if (OB_UNLIKELY(T_DESCRIBE_SELECT != parse_tree.type_ || 1 != parse_tree.num_child_)
+      || OB_ISNULL(parse_tree.children_[0])) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("unexpected describe node", K(ret), K(parse_tree.type_), K(parse_tree.num_child_));
+  } else if (OB_ISNULL(params_.allocator_) || OB_ISNULL(params_.expr_factory_)
+             || OB_ISNULL(params_.session_info_) || OB_ISNULL(params_.query_ctx_)
+             || OB_ISNULL(params_.stmt_factory_)) {
+    ret = OB_NOT_INIT;
+  } else {
+    ObStmt *inner_stmt = NULL;
+    ObSelectStmt *inner = NULL;
+    if (OB_FAIL(select_stmt_resolver_func<ObSelectResolver>(
+            params_, *parse_tree.children_[0], inner_stmt))) {
+    } else if (OB_ISNULL(inner_stmt) || !inner_stmt->is_select_stmt()) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("describe of a non-select statement", K(ret));
+    } else {
+      inner = static_cast<ObSelectStmt *>(inner_stmt);
+    }
+
+    ObValuesTableDef *values_def = NULL;
+    if (OB_SUCC(ret)) {
+      void *buf = params_.allocator_->alloc(sizeof(ObValuesTableDef));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        values_def = new (buf) ObValuesTableDef();
+        values_def->access_type_ = ObValuesTableDef::ACCESS_OBJ;
+        values_def->column_cnt_ = COLUMN_CNT;
+        values_def->row_cnt_ = inner->get_select_item_size();
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < COLUMN_CNT; ++i) {
+      ObRawExprResType res_type;
+      ObAccuracy accuracy;
+      accuracy.set_length(1024);
+      res_type.set_type(ObVarcharType);
+      res_type.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+      res_type.set_collation_level(CS_LEVEL_COERCIBLE);
+      res_type.set_accuracy(accuracy);
+      if (OB_FAIL(values_def->column_types_.push_back(res_type))) {
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < inner->get_select_item_size(); ++i) {
+      const SelectItem &item = inner->get_select_item(i);
+      const char *type_name = "VARCHAR";
+      bool nullable = true;
+      if (OB_ISNULL(item.expr_) || OB_ISNULL(values_def)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObRawExprResType &res_type = item.expr_->get_result_type();
+        type_name = describe_obj_type_name(res_type.get_type());
+        nullable = !res_type.has_result_flag(NOT_NULL_FLAG);
+        // a column of a file table knows exactly what the reader inferred
+        if (T_REF_COLUMN == item.expr_->get_expr_type()) {
+          const ObColumnRefRawExpr *col = static_cast<const ObColumnRefRawExpr *>(item.expr_);
+          for (int64_t t = 0; t < inner->get_table_size(); ++t) {
+            const TableItem *table = inner->get_table_item(t);
+            if (NULL != table && table->table_id_ == col->get_table_id()
+                && NULL != table->file_table_def_) {
+              const int64_t column_idx = col->get_column_id() - common::OB_APP_MIN_COLUMN_ID;
+              if (column_idx >= 0 && column_idx < table->file_table_def_->columns_.count()) {
+                const ObFileColumnDef &file_col = table->file_table_def_->columns_.at(column_idx);
+                type_name = describe_file_type_name(file_col.type_);
+                nullable = file_col.nullable_;
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret)
+            && OB_FAIL(describe_push_varchar(*values_def, *params_.allocator_, item.expr_name_))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(describe_push_const(*values_def, type_name))) {
+        } else if (OB_SUCC(ret)
+                   && OB_FAIL(describe_push_const(*values_def, nullable ? "YES" : "NO"))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(describe_push_null(*values_def))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(describe_push_null(*values_def))) {
+        } else if (OB_SUCC(ret) && OB_FAIL(describe_push_null(*values_def))) {
+        }
+      }
+    }
+
+    ObSelectStmt *describe = NULL;
+    if (OB_SUCC(ret)) {
+      if (OB_FAIL(params_.stmt_factory_->create_stmt(describe))) {
+      } else if (OB_ISNULL(describe)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        describe->set_query_ctx(params_.query_ctx_);
+        if (OB_FAIL(describe->set_stmt_id())) {
+        } else {
+          for (int64_t i = 0; OB_SUCC(ret) && i < COLUMN_CNT; ++i) {
+            SelectItem select_item;
+            ObString name = ObString::make_string(DESCRIBE_COLUMN_NAMES[i]);
+            select_item.alias_name_ = name;
+            select_item.expr_name_ = name;
+            select_item.is_real_alias_ = true;
+            select_item.expr_ = NULL;
+            if (OB_FAIL(describe->add_select_item(select_item))) {
+            }
+          }
+          if (OB_SUCC(ret) && OB_FAIL(ObResolverUtils::create_values_table_query(
+                  params_.session_info_, params_.allocator_, params_.expr_factory_,
+                  params_.query_ctx_, describe, values_def))) {
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      stmt = describe;
+    }
   }
   return ret;
 }
@@ -474,6 +676,16 @@ int ObResolver::resolve(IsPrepared if_prepared, const ParseNode &parse_tree, ObS
       }
       case T_EXPLAIN: {
         REGISTER_STMT_RESOLVER(Explain);
+        break;
+      }
+      case T_DESCRIBE_SELECT: {
+        // the statement that comes back is a select
+        params_.session_info_->set_stmt_type(stmt::T_SELECT);
+        ObExecContext *describe_exec_ctx = params_.session_info_->get_cur_exec_ctx();
+        if (NULL != describe_exec_ctx && NULL != describe_exec_ctx->get_sql_ctx()) {
+          describe_exec_ctx->get_sql_ctx()->stmt_type_ = stmt::T_SELECT;
+        }
+        ret = resolve_describe_select(*real_parse_tree, stmt);
         break;
       }
       case T_ALTER_SYSTEM_SET: {

@@ -1580,7 +1580,8 @@ typedef enum ObItemType
   T_RESERVED_3996 = 3996,
   T_RESERVED_3997 = 3997,
   T_RESERVED_3998 = 3998,
-  T_RESERVED_3999 = 3999,
+  // DESCRIBE <select>: report the columns a query would produce
+  T_DESCRIBE_SELECT = 3999,
   T_RESERVED_4000 = 4000,
   T_RESERVED_4001 = 4001,
   T_RESERVED_4002 = 4002,

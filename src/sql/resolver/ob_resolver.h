@@ -47,6 +47,11 @@ private:
 
   template <typename SelectResolverType>
   int select_stmt_resolver_func(ObResolverParams &params, const ParseNode &parse_tree, ObStmt *&stmt);
+
+  // DESCRIBE <select>: describe the columns the select would produce, without
+  // running it. Resolved into a query over a values table that carries one row
+  // per output column.
+  int resolve_describe_select(const ParseNode &parse_tree, ObStmt *&stmt);
 private:
   // data members
   ObResolverParams params_;

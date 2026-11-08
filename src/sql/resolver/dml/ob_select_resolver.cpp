@@ -2991,6 +2991,7 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
   int ret = OB_SUCCESS;
   bool has_format_type = false;
   bool has_cs_type = false;
+  bool has_field_term = false;
   ObExternalFileFormat external_format;
   ParseNode* format_node = NULL;
   ParseNode* option_node = NULL;
@@ -3030,6 +3031,32 @@ int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, Ob
       } else if (T_EXTERNAL_FILE_FORMAT_TYPE == option_node->type_
                  || T_CHARSET == option_node->type_) {
       } else if (OB_FAIL(ObResolverUtils::resolve_file_format(option_node, external_format, params_))) {
+      } else {
+        has_field_term |= (T_FIELD_TERMINATED_STR == option_node->type_);
+      }
+    }
+    if (OB_SUCC(ret) && !has_field_term) {
+      // the shared default field terminator is a tab (LOAD DATA semantics); a
+      // csv file separates its fields with a comma unless told otherwise
+      external_format.csv_format_.field_term_str_ = ObString::make_string(",");
+    }
+    if (OB_SUCC(ret)) {
+      ObCollationType file_cs_type = has_cs_type
+                                     ? ObCharset::get_default_collation(external_format.csv_format_.cs_type_)
+                                     : ObCharset::get_system_collation();
+      ObString field_str;
+      ObString line_str;
+      if (OB_FAIL(ob_write_string(*allocator_, external_format.csv_format_.field_term_str_,
+                                  field_str))) {
+      } else if (OB_FAIL(ob_write_string(*allocator_, external_format.csv_format_.line_term_str_,
+                                         line_str))) {
+      } else {
+        // the file writer takes the separator from the into item, not from the
+        // format, so it has to be set here
+        into_item.field_str_.set_varchar(field_str);
+        into_item.field_str_.set_collation_type(file_cs_type);
+        into_item.line_str_.set_varchar(line_str);
+        into_item.line_str_.set_collation_type(file_cs_type);
       }
     }
     if (OB_SUCC(ret)
