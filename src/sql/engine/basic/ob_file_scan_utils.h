@@ -155,6 +155,11 @@ public:
                                const common::ObString &path,
                                ObFileTableMeta &meta);
 
+  // Read a parquet footer and derive its flat primitive columns.
+  static int infer_parquet_schema(common::ObIAllocator &alloc,
+                                  const common::ObString &path,
+                                  ObFileTableMeta &meta);
+
   // Turn a text field into a typed value, using the type the schema inference
   // decided for the column. Used by both readers.
   static int convert_field(common::ObIAllocator &alloc,
@@ -247,6 +252,29 @@ private:
   int64_t pos_;
   char *io_buf_;
   common::ObSEArray<common::ObString, 16> col_names_;
+};
+
+// A parquet file opened for reading. Flat primitive columns only, and the page
+// codec has to be none or snappy (the two a normal writer emits). Every value is
+// produced as text so the caller converts it exactly like a csv or json field.
+class ObParquetReader
+{
+public:
+  ObParquetReader();
+  ~ObParquetReader();
+
+  // columns must be the schema produced by infer_parquet_schema.
+  int open(common::ObIAllocator &alloc,
+           const common::ObString &path,
+           const common::ObSEArray<ObFileColumnDef, 16> &columns);
+  // Append the next row to row. Returns OB_ITER_END at the end of the file.
+  int get_next_row(common::ObIAllocator &alloc, ObFileRow &row);
+  void close();
+
+private:
+  struct State;
+  State *state_;
+  bool opened_;
 };
 
 } // namespace sql

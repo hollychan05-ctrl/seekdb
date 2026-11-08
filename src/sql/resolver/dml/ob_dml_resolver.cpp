@@ -4188,8 +4188,8 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
         break;
       }
       case 3: {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "read_parquet");
+        if (OB_FAIL(ObFileScanUtils::infer_parquet_schema(*allocator_, file_path, meta))) {
+        }
         break;
       }
       default: {
@@ -4298,7 +4298,7 @@ int ObDMLResolver::materialize_file_values(const ObFileTableDef &def,
       }
       values_def.row_cnt_ = files.count();
     }
-  } else if (1 == def.kind_ || 2 == def.kind_) {
+  } else if (1 == def.kind_ || 2 == def.kind_ || 3 == def.kind_) {
     ObFileRow row;
     if (1 == def.kind_) {
       ObFileCsvReader reader;
@@ -4314,8 +4314,22 @@ int ObDMLResolver::materialize_file_values(const ObFileTableDef &def,
         }
       }
       reader.close();
-    } else {
+    } else if (2 == def.kind_) {
       ObFileJsonReader reader;
+      if (OB_FAIL(reader.open(*allocator_, def.file_path_, def.columns_))) {
+      } else {
+        while (OB_SUCC(ret)) {
+          ret = reader.get_next_row(*allocator_, row);
+          if (OB_ITER_END == ret) {
+            ret = OB_SUCCESS;
+            break;
+          } else if (OB_SUCC(ret) && OB_FAIL(append_file_row(*allocator_, def, row, values_def))) {
+          }
+        }
+      }
+      reader.close();
+    } else {
+      ObParquetReader reader;
       if (OB_FAIL(reader.open(*allocator_, def.file_path_, def.columns_))) {
       } else {
         while (OB_SUCC(ret)) {
