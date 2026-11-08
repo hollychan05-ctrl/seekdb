@@ -157,8 +157,7 @@ const char *describe_obj_type_name(const ObObjType type)
   switch (type) {
     case ObTinyIntType:
     case ObUTinyIntType:  return "TINYINT";
-    case ObIntType:
-    case ObInt64Type:     return "BIGINT";
+    case ObIntType:       return "BIGINT";
     case ObInt32Type:     return "INTEGER";
     case ObUInt64Type:    return "UBIGINT";
     case ObUInt32Type:    return "UINTEGER";
