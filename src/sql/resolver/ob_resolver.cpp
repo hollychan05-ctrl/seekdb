@@ -246,7 +246,7 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
     }
     int64_t inner_items = (NULL != inner) ? inner->get_select_item_size() : -1;
     int64_t inner_tables = (NULL != inner) ? inner->get_table_size() : -1;
-    LOG_ERROR("DESCDBG", "inner resolved", K(ret), K(inner_items), K(inner_tables));
+    LOG_ERROR("DESCDBG inner resolved", K(ret), K(inner_items), K(inner_tables));
 
     ObValuesTableDef *values_def = NULL;
     if (OB_SUCC(ret)) {
@@ -312,7 +312,7 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
     int64_t v_rows = (NULL != values_def) ? values_def->row_cnt_ : -1;
     int64_t v_cells = (NULL != values_def) ? values_def->access_objs_.count() : -1;
     int64_t v_cols = (NULL != values_def) ? values_def->column_types_.count() : -1;
-    LOG_ERROR("DESCDBG", "rows built", K(ret), K(v_rows), K(v_cells), K(v_cols));
+    LOG_ERROR("DESCDBG rows built", K(ret), K(v_rows), K(v_cells), K(v_cols));
 
     ObSelectStmt *describe = NULL;
     if (OB_SUCC(ret)) {
@@ -349,7 +349,7 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
       }
     }
     int64_t d_items = (NULL != describe) ? describe->get_select_item_size() : -1;
-    LOG_ERROR("DESCDBG", "describe built", K(ret), K(d_items));
+    LOG_ERROR("DESCDBG describe built", K(ret), K(d_items));
     if (OB_SUCC(ret)) {
       stmt = describe;
     }
