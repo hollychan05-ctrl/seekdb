@@ -3955,6 +3955,8 @@ static int file_sql_column_res_type(const ObFileColumnType type, ObRawExprResTyp
   }
   res_type.set_type(obj_type);
   res_type.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
+  // a string column ref must carry a coercibility or deduce_type rejects it
+  res_type.set_collation_level(CS_LEVEL_COERCIBLE);
   res_type.set_accuracy(accuracy);
   return ret;
 }
@@ -4002,7 +4004,8 @@ static int append_file_row(ObIAllocator &alloc,
       bool ok = false;
       if (OB_FAIL(ObFileScanUtils::parse_datetime(row.at(i).text_, usec, ok))) {
       } else if (ok) {
-        cell.set_datetime(usec);
+        // parse_datetime yields seconds; a datetime object holds microseconds
+        cell.set_datetime(usec * 1000000LL);
       } else {
         cell.set_null();
       }
