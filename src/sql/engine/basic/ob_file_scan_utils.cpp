@@ -1873,6 +1873,9 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
       int32_t page_encoding = 0;
       int32_t uncompressed_size = 0;
       int32_t compressed_size = 0;
+      int32_t rep_len = 0;
+      int32_t def_len = 0;
+      bool values_compressed = true;
       while (OB_SUCC(ret) && !stop) {
         int64_t id = 0;
         uint8_t ft = 0;
@@ -1910,45 +1913,116 @@ int ObParquetReader::open(ObIAllocator &alloc, const ObString &path,
             } else if (OB_FAIL(pt_skip(t, dt))) {
             }
           }
+        } else if (8 == id && 12 == ft) {
+          // DataPageHeaderV2: 1 num_values, 4 encoding, 5 def_len, 6 rep_len, 7 is_compressed
+          int64_t dlast = 0;
+          bool dstop = false;
+          while (OB_SUCC(ret) && !dstop) {
+            int64_t did = 0;
+            uint8_t dt = 0;
+            if (OB_FAIL(pt_field(t, dlast, dstop, did, dt))) {
+            } else if (dstop) {
+            } else if (1 == did && 5 == dt) {
+              int32_t v = 0;
+              if (OB_FAIL(pt_read_i32(t, v))) {
+              } else {
+                page_num_values = v;
+              }
+            } else if (4 == did && 5 == dt) {
+              if (OB_FAIL(pt_read_i32(t, page_encoding))) {
+              }
+            } else if (5 == did && 5 == dt) {
+              if (OB_FAIL(pt_read_i32(t, def_len))) {
+              }
+            } else if (6 == did && 5 == dt) {
+              if (OB_FAIL(pt_read_i32(t, rep_len))) {
+              }
+            } else if (7 == did && (1 == dt || 2 == dt)) {
+              values_compressed = (1 == dt);
+            } else if (OB_FAIL(pt_skip(t, dt))) {
+            }
+          }
         } else if (OB_FAIL(pt_skip(t, ft))) {
         }
       }
-      const char *page_in = NULL;
-      int64_t page_in_len = 0;
+      // A v2 data page keeps the repetition and definition levels uncompressed at
+      // the front and compresses only the values, while a v1 page compresses
+      // everything. Rebuild the v1 layout (a length prefixed level block followed
+      // by the values) so the one decoder below serves both page versions.
       char *page = NULL;
       int64_t page_len = 0;
+      const int32_t codec = chunks.at(c).codec_;
       if (OB_FAIL(ret)) {
-      } else if (0 != page_type) {
+      } else if (0 != page_type && 3 != page_type) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "this parquet page type");
-      } else if (0 != page_encoding && page_encoding != 2 && page_encoding != 8) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "this parquet encoding");
       } else if (0 != page_encoding) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "dictionary encoded parquet data");
       } else if (t.p_ + compressed_size > data + size) {
         ret = OB_INVALID_DATA;
-      } else if (OB_ISNULL(page = static_cast<char *>(alloc.alloc(uncompressed_size > 0 ? uncompressed_size : 1)))) {
-        ret = OB_ALLOCATE_MEMORY_FAILED;
-      } else {
-        page_in = t.p_;
-        page_in_len = compressed_size;
-        const int32_t codec = chunks.at(c).codec_;
-        if (0 == codec) {
+      } else if (3 != page_type) {
+        // v1: the whole page is compressed
+        char *whole = NULL;
+        if (OB_ISNULL(whole = static_cast<char *>(alloc.alloc(uncompressed_size > 0 ? uncompressed_size : 1)))) {
+          ret = OB_ALLOCATE_MEMORY_FAILED;
+        } else if (0 == codec) {
           if (compressed_size > uncompressed_size) {
             ret = OB_INVALID_DATA;
           } else {
-            MEMCPY(page, page_in, compressed_size);
+            MEMCPY(whole, t.p_, compressed_size);
             page_len = compressed_size;
           }
         } else if (1 == codec) {
-          if (OB_FAIL(fs_snappy_uncompress(page_in, page_in_len, page, uncompressed_size, page_len))) {
+          if (OB_FAIL(fs_snappy_uncompress(t.p_, compressed_size, whole, uncompressed_size, page_len))) {
             LOG_WARN("fail to snappy decompress", K(ret));
           }
         } else {
           ret = OB_NOT_SUPPORTED;
           LOG_USER_ERROR(OB_NOT_SUPPORTED, "this parquet compression");
+        }
+        page = whole;
+      } else {
+        // v2: levels are raw, only the values may be compressed
+        if (rep_len + def_len > compressed_size || rep_len + def_len > uncompressed_size) {
+          ret = OB_INVALID_DATA;
+        } else {
+          const char *val_in = t.p_ + rep_len + def_len;
+          const int64_t val_in_len = compressed_size - rep_len - def_len;
+          const int64_t val_out_len = uncompressed_size - rep_len - def_len;
+          const bool has_def = (1 == state->cols_.at(c).repetition_);
+          const int64_t head = has_def ? (4 + def_len) : 0;
+          char *whole = NULL;
+          if (OB_ISNULL(whole = static_cast<char *>(alloc.alloc(head + (val_out_len > 0 ? val_out_len : 1))))) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            if (has_def) {
+              uint32_t lvl = static_cast<uint32_t>(def_len);
+              MEMCPY(whole, &lvl, 4);
+              if (def_len > 0) {
+                MEMCPY(whole + 4, t.p_ + rep_len, def_len);
+              }
+            }
+            char *val_out = whole + head;
+            int64_t got = 0;
+            if (values_compressed && 1 == codec) {
+              if (OB_FAIL(fs_snappy_uncompress(val_in, val_in_len, val_out, val_out_len, got))) {
+                LOG_WARN("fail to snappy decompress", K(ret));
+              }
+            } else if (0 == codec || !values_compressed) {
+              if (val_in_len > val_out_len) {
+                ret = OB_INVALID_DATA;
+              } else {
+                MEMCPY(val_out, val_in, val_in_len);
+                got = val_in_len;
+              }
+            } else {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "this parquet compression");
+            }
+            page = whole;
+            page_len = head + got;
+          }
         }
       }
       // definition levels come first when the column is optional

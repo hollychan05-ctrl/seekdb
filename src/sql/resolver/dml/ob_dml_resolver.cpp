@@ -4092,23 +4092,49 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
       } else if (NULL != name_node->raw_text_) {
         name.assign_ptr(name_node->raw_text_, name_node->text_len_);
       }
-      // the argument value is a literal: read it straight from the parse node
+      // The argument value is a literal, so it can be read straight from the
+      // parse node. An integer literal is a T_NUMBER here (T_INT is only used
+      // inside some statements) and a bare "true"/"false" arrives as a word.
       bool is_int = false;
       bool is_str = false;
       int64_t int_val = 0;
       ObString str_val;
-      if (NULL != val_node && (T_INT == val_node->type_ || T_BOOL == val_node->type_)) {
+      const ParseNode *num_node = val_node;
+      bool neg = false;
+      if (NULL != num_node && T_OP_NEG == num_node->type_ && 1 == num_node->num_child_) {
+        neg = true;
+        num_node = num_node->children_[0];
+      }
+      if (NULL != num_node && (T_INT == num_node->type_ || T_NUMBER == num_node->type_
+                               || T_UNUMBER == num_node->type_ || T_BOOL == num_node->type_)) {
         is_int = true;
-        int_val = val_node->value_;
-      } else if (NULL != val_node && T_OP_NEG == val_node->type_
-                 && 1 == val_node->num_child_ && NULL != val_node->children_[0]
-                 && (T_INT == val_node->children_[0]->type_ || T_BOOL == val_node->children_[0]->type_)) {
-        is_int = true;
-        int_val = -val_node->children_[0]->value_;
+        int_val = neg ? -num_node->value_ : num_node->value_;
       } else if (NULL != val_node && NULL != val_node->str_value_) {
         is_str = true;
         str_val.assign_ptr(val_node->str_value_, val_node->str_len_);
-      } else {
+      } else if (NULL != val_node && NULL != val_node->raw_text_ && 0 == val_node->num_child_) {
+        ObString txt(val_node->text_len_, val_node->raw_text_);
+        if (0 == txt.case_compare("true")) {
+          is_int = true;
+          int_val = 1;
+        } else if (0 == txt.case_compare("false")) {
+          is_int = true;
+          int_val = 0;
+        } else {
+          char buf[32];
+          if (txt.length() > 0 && txt.length() < static_cast<int64_t>(sizeof(buf))) {
+            MEMCPY(buf, txt.ptr(), txt.length());
+            buf[txt.length()] = '\0';
+            char *end = NULL;
+            const long long v = ::strtoll(buf, &end, 10);
+            if (NULL != end && '\0' == *end && end != buf) {
+              is_int = true;
+              int_val = v;
+            }
+          }
+        }
+      }
+      if (OB_SUCC(ret) && !is_int && !is_str) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "a non constant file table argument");
       }
