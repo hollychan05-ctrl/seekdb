@@ -8932,6 +8932,7 @@ COPY '(' select_stmt ')' TO STRING_VALUE copy_options_opt
     malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3, $6, format_list, NULL);
     $3->children_[PARSE_SELECT_INTO] = into_node;
   }
+  (void) ($7);
   $$ = $3;
 }
 ;
@@ -8942,6 +8943,7 @@ copy_options_opt:
 }
 | '(' copy_option_list ')'
 {
+  (void) ($2);
   $$ = NULL;
 }
 ;
@@ -8949,10 +8951,13 @@ copy_options_opt:
 copy_option_list:
 copy_option
 {
+  (void) ($1);
   $$ = NULL;
 }
 | copy_option_list ',' copy_option
 {
+  (void) ($1);
+  (void) ($3);
   $$ = NULL;
 }
 ;
@@ -8960,18 +8965,24 @@ copy_option
 copy_option:
 NAME_OB
 {
+  (void) ($1);
   $$ = NULL;
 }
 | FORMAT NAME_OB
 {
+  (void) ($2);
   $$ = NULL;
 }
 | NAME_OB STRING_VALUE
 {
+  (void) ($1);
+  (void) ($2);
   $$ = NULL;
 }
 | FORMAT NAME_OB STRING_VALUE
 {
+  (void) ($2);
+  (void) ($3);
   $$ = NULL;
 }
 ;
