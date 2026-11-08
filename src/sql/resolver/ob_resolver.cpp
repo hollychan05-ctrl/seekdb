@@ -91,6 +91,7 @@
 #include "sql/resolver/ddl/ob_purge_resolver.h"
 #include "sql/resolver/ddl/ob_set_comment_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_wrap_enum_set.h"
+#include "sql/resolver/expr/ob_raw_expr_util.h"
 #include "sql/engine/basic/ob_file_scan_utils.h"
 #include "sql/resolver/cmd/ob_get_diagnostics_resolver.h"
 #include "sql/resolver/dcl/ob_alter_role_resolver.h"
@@ -316,12 +317,19 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
         } else {
           for (int64_t i = 0; OB_SUCC(ret) && i < COLUMN_CNT; ++i) {
             SelectItem select_item;
+            ObConstRawExpr *const_expr = NULL;
             ObString name = ObString::make_string(DESCRIBE_COLUMN_NAMES[i]);
-            select_item.alias_name_ = name;
-            select_item.expr_name_ = name;
-            select_item.is_real_alias_ = true;
-            select_item.expr_ = NULL;
-            if (OB_FAIL(describe->add_select_item(select_item))) {
+            // add_select_item rejects an item without an expression; the
+            // expression itself is replaced once the table is wired up
+            if (OB_FAIL(ObRawExprUtils::build_const_int_expr(
+                    *params_.expr_factory_, ObIntType, 0, const_expr))) {
+            } else {
+              select_item.alias_name_ = name;
+              select_item.expr_name_ = name;
+              select_item.is_real_alias_ = true;
+              select_item.expr_ = const_expr;
+              if (OB_FAIL(describe->add_select_item(select_item))) {
+              }
             }
           }
           if (OB_SUCC(ret) && OB_FAIL(ObResolverUtils::create_values_table_query(
