@@ -244,9 +244,6 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
     } else {
       inner = static_cast<ObSelectStmt *>(inner_stmt);
     }
-    int64_t inner_items = (NULL != inner) ? inner->get_select_item_size() : -1;
-    int64_t inner_tables = (NULL != inner) ? inner->get_table_size() : -1;
-    LOG_ERROR("DESCDBG inner resolved", K(ret), K(inner_items), K(inner_tables));
 
     ObValuesTableDef *values_def = NULL;
     if (OB_SUCC(ret)) {
@@ -309,10 +306,13 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
       }
     }
 
-    int64_t v_rows = (NULL != values_def) ? values_def->row_cnt_ : -1;
-    int64_t v_cells = (NULL != values_def) ? values_def->access_objs_.count() : -1;
-    int64_t v_cols = (NULL != values_def) ? values_def->column_types_.count() : -1;
-    LOG_ERROR("DESCDBG rows built", K(ret), K(v_rows), K(v_cells), K(v_cols));
+    // the optimizer reads a per column distinct/null count from a values table
+    // and treats a missing entry as an allocation failure
+    for (int64_t i = 0; OB_SUCC(ret) && i < COLUMN_CNT; ++i) {
+      if (OB_FAIL(values_def->column_ndvs_.push_back(values_def->row_cnt_))) {
+      } else if (OB_FAIL(values_def->column_nnvs_.push_back(0))) {
+      }
+    }
 
     ObSelectStmt *describe = NULL;
     if (OB_SUCC(ret)) {
@@ -348,8 +348,6 @@ int ObResolver::resolve_describe_select(const ParseNode &parse_tree, ObStmt *&st
         }
       }
     }
-    int64_t d_items = (NULL != describe) ? describe->get_select_item_size() : -1;
-    LOG_ERROR("DESCDBG describe built", K(ret), K(d_items));
     if (OB_SUCC(ret)) {
       stmt = describe;
     }
