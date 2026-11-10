@@ -2319,6 +2319,15 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
 
+  // The column references of the expression must know their names, otherwise the
+  // prompt expression cannot be printed back to SQL text for the async worker.
+  for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+    const ObQualifiedName &q_name = columns.at(i);
+    if (OB_NOT_NULL(q_name.ref_expr_)) {
+      q_name.ref_expr_->set_column_name(q_name.col_name_);
+    }
+  }
+
   // the explicit embedding dimension must agree with the vector column
   if (OB_SUCC(ret) && is_embed && raw_expr->get_param_count() >= 3 && column.is_collection()) {
     const ObRawExpr *dim_expr = raw_expr->get_param_expr(2);
