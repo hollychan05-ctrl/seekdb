@@ -106,16 +106,18 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     }
   }
 
+  // A value change of a column an AI COLUMN depends on invalidates the AI COLUMN.
+  // It runs before the additional assignments so that clearing a vector AI COLUMN
+  // is seen by the vector index maintenance below.
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(inject_ai_column_invalidation(tables_assign))) {
+    }
+  }
+
   if (OB_SUCC(ret)) {
     // Parse cascading update columns
     if (OB_FAIL(resolve_additional_assignments(tables_assign,
                                                T_UPDATE_SCOPE))) {
-    }
-  }
-
-  // a value change of a column an AI COLUMN depends on invalidates the AI COLUMN
-  if (OB_SUCC(ret)) {
-    if (OB_FAIL(inject_ai_column_invalidation(tables_assign))) {
     }
   }
 
