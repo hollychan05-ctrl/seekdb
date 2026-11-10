@@ -1830,7 +1830,7 @@ int check_ai_column_strict_read(ObSchemaChecker &schema_checker,
     } else {
       g_ai_column_strict_probe = true;
       SMART_VAR(ObMySQLProxy::MySQLResult, res) {
-        ObMySQLResult *result_set = NULL;
+        common::sqlclient::ObMySQLResult *result_set = NULL;
         if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
         } else if (OB_ISNULL(result_set = res.get_result())) {
           ret = OB_ERR_UNEXPECTED;
