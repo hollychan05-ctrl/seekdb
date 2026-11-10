@@ -1352,9 +1352,24 @@ int ObAiColumnWorker::handle_group_failure(const ObTableSchema &table,
 // DML reconciliation: turn every PENDING row of the modified table into a task.
 // Runs in the same transaction as the DML statement.
 // --------------------------------------------------------------------------
+// The reconciliation itself runs DML on the very table it reconciles, so the
+// nested statement must not reconcile again (guarded per thread because the
+// nested SQL is executed synchronously on the same thread).
+struct AiReconcileGuard
+{
+  AiReconcileGuard() { in_guard_ = true; }
+  ~AiReconcileGuard() { in_guard_ = false; }
+  static thread_local bool in_guard_;
+};
+thread_local bool AiReconcileGuard::in_guard_ = false;
+
 int reconcile_ai_columns(ObTableModifyOp &op)
 {
   int ret = OB_SUCCESS;
+  if (AiReconcileGuard::in_guard_) {
+    return OB_SUCCESS;
+  }
+  AiReconcileGuard guard;
   ObExecContext &ctx = op.get_exec_ctx();
   ObSqlCtx *sql_ctx = ctx.get_sql_ctx();
   ObSQLSessionInfo *session = ctx.get_my_session();
