@@ -1017,12 +1017,12 @@ int ObAiColumnWorker::load_tasks(ObArenaAllocator &allocator, ObIArray<AiColumnT
           int64_t column_id = 0;
           ObString request_id;
           ObString predicate;
-          if (OB_FAIL(result_set->get_int(0, table_id))) {
-          } else if (OB_FAIL(result_set->get_int(1, column_id))) {
-          } else if (OB_FAIL(result_set->get_varchar(2, request_id))) {
-          } else if (OB_FAIL(result_set->get_varchar(3, predicate))) {
-          } else if (OB_FAIL(result_set->get_int(4, task.state_))) {
-          } else if (OB_FAIL(result_set->get_int(5, task.retry_count_))) {
+          if (OB_FAIL(result_set->get_int(static_cast<int64_t>(0), table_id))) {
+          } else if (OB_FAIL(result_set->get_int(static_cast<int64_t>(1), column_id))) {
+          } else if (OB_FAIL(result_set->get_varchar(static_cast<int64_t>(2), request_id))) {
+          } else if (OB_FAIL(result_set->get_varchar(static_cast<int64_t>(3), predicate))) {
+          } else if (OB_FAIL(result_set->get_int(static_cast<int64_t>(4), task.state_))) {
+          } else if (OB_FAIL(result_set->get_int(static_cast<int64_t>(5), task.retry_count_))) {
           } else if (OB_FAIL(ob_write_string(allocator, request_id, task.request_id_))) {
           } else if (OB_FAIL(ob_write_string(allocator, predicate, task.rowkey_predicate_))) {
           } else if (FALSE_IT(task.table_id_ = static_cast<uint64_t>(table_id))) {
@@ -1165,7 +1165,7 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
         ret = OB_ERR_UNEXPECTED;
       } else if (OB_FAIL(result_set->next())) {
         // the row disappeared, nothing to compute
-      } else if (OB_FAIL(result_set->get_varchar(0, raw))) {
+      } else if (OB_FAIL(result_set->get_varchar(static_cast<int64_t>(0), raw))) {
       } else if (OB_FAIL(ob_write_string(allocator, raw, prompt_text))) {
       }
     }
@@ -1438,7 +1438,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                      || OB_FAIL(ai_append_identifier(sql, request_col->get_column_name_str()))
                      || OB_FAIL(sql.append(", CONCAT("))
                      || OB_FAIL(ai_append_sql_string(sql, rowkey_prefix.string()))
-                     || OB_FAIL(sql.append(", `%.*s`), now(6), %ld, 0 FROM `%.*s`.`%.*s` WHERE ",
+                     || OB_FAIL(sql.append_fmt(", `%.*s`), now(6), %ld, 0 FROM `%.*s`.`%.*s` WHERE ",
                                pk_col->get_column_name_str().length(),
                                pk_col->get_column_name_str().ptr(), AI_TASK_PENDING,
                                db_name.length(), db_name.ptr(), table_name.length(),
