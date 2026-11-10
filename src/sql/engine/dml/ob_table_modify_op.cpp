@@ -1414,7 +1414,10 @@ int reconcile_ai_columns(ObTableModifyOp &op)
       ObString table_name = table_schema->get_table_name_str();
       ObSEArray<ObColDesc, 4> rowkey_cols;
       const ObColumnSchemaV2 *pk_col = NULL;
+      LOG_INFO("[AI_COL_DBG] reconcile begin", K(table_loc_id), K(ai_columns.count()),
+               K(rowkey_prefix.string()));
       int tmp_ret = op.begin_nested_session(true /*skip_cur_stmt_tables*/);
+      LOG_INFO("[AI_COL_DBG] nested session", KR(tmp_ret));
       if (OB_SUCCESS != tmp_ret) {
         ret = tmp_ret;
       } else if (OB_FAIL(table_schema->get_rowkey_column_ids(rowkey_cols))
@@ -1444,6 +1447,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                                AI_STATE_PENDING))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
+          LOG_INFO("[AI_COL_DBG] mark write", KR(ret), K(ret), K(i));
           sql.reuse();
           if (OB_FAIL(ret)) {
           } else if (OB_FAIL(sql.append_fmt("REPLACE INTO %s "
@@ -1466,6 +1470,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                                AI_STATE_PENDING))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
+          LOG_INFO("[AI_COL_DBG] insert write", KR(ret), K(ret), K(i));
         }
       }
       int end_ret = op.end_nested_session();
@@ -1476,6 +1481,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
       if (OB_SUCCESS != close_ret && OB_SUCCESS == ret) {
         ret = close_ret;
       }
+      LOG_INFO("[AI_COL_DBG] reconcile end", KR(ret), K(ret));
     }
     if (OB_SUCC(ret) && !ai_columns.empty()) {
       ObAiColumnWorker::instance().ensure_started();
@@ -1508,8 +1514,10 @@ int ObTableModifyOp::inner_close()
   dml_modify_rows_.clear();
   if (OB_SUCC(ret)) {
     if (OB_FAIL(reconcile_ai_columns(*this))) {
-      LOG_WARN("failed to reconcile the ai columns", KR(ret));
+      LOG_INFO("[AI_COL_DBG] reconcile failed", KR(ret), K(ret));
     }
+  } else {
+    LOG_INFO("[AI_COL_DBG] skipped, dml failed", KR(ret), K(ret));
   }
   return ret;
 }
