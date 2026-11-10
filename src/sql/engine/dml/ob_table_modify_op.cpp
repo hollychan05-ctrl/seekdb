@@ -1047,7 +1047,6 @@ int ObAiColumnWorker::process_one_group()
   } else if (tasks.empty()) {
     // nothing to do
   } else {
-    LOG_INFO("[AI_COL_W] loaded", "count", tasks.count());
     // group the tasks that belong to the same row and the same request
     const AiColumnTask &first = tasks.at(0);
     int64_t group_end = 1;
@@ -1128,8 +1127,6 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
       } else if (OB_FAIL(results.push_back(result))) {
       }
     }
-    LOG_INFO("[AI_COL_W] group", KR(ret), K(all_ok), K(matched.count()),
-             K(results.count()), K(group_begin), K(group_end));
     if (OB_FAIL(ret)) {
     } else if (all_ok) {
       if (OB_FAIL(publish_group(*table_schema, *db_schema, tasks, group_begin, group_end,
@@ -1139,7 +1136,6 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
       if (OB_FAIL(defer_or_drop_group(*table_schema, tasks, group_begin, group_end, matched))) {
       }
     }
-    LOG_INFO("[AI_COL_W] group done", KR(ret));
   }
   return ret;
 }
@@ -1171,18 +1167,14 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
       ObMySQLResult *result_set = NULL;
       ObString raw;
-      int next_ret = OB_SUCCESS;
-      int get_ret = OB_SUCCESS;
       if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
       } else if (OB_ISNULL(result_set = res.get_result())) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(next_ret = result_set->next())) {
+      } else if (OB_FAIL(result_set->next())) {
         // the row disappeared, nothing to compute
-      } else if (OB_FAIL(get_ret = result_set->get_varchar(static_cast<int64_t>(0), raw))) {
+      } else if (OB_FAIL(result_set->get_varchar(static_cast<int64_t>(0), raw))) {
       } else if (OB_FAIL(ob_write_string(allocator, raw, prompt_text))) {
       }
-      LOG_INFO("[AI_COL_W] prompt", KR(ret), K(next_ret), K(get_ret), K(sql.string()),
-               K(raw));
     }
   }
   // 2. ask the model
@@ -1215,8 +1207,6 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
         } else if (OB_FAIL(ob_write_string(allocator, value.string(), result))) {
         }
       }
-      LOG_INFO("[AI_COL_W] model", KR(ret), K(info.model_), K(prompt_text),
-               K(model_result), K(info.system_));
     }
   }
   return ret;
@@ -1276,7 +1266,6 @@ int ObAiColumnWorker::publish_group(const ObTableSchema &table,
         }
       }
     }
-    LOG_INFO("[AI_COL_W] publish", KR(ret), K(affected));
     int end_ret = trans.end(OB_SUCC(ret));
     if (OB_SUCCESS != end_ret && OB_SUCCESS == ret) {
       ret = end_ret;
@@ -1434,7 +1423,6 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                                table_name.length(), table_name.ptr()))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
-          LOG_INFO("[AI_COL_DBG] orphan delete", KR(ret), K(i), K(sql.string()));
           // 2) create (or refresh) the task of every clear AI COLUMN
           sql.reuse();
           if (OB_FAIL(ret)) {
@@ -1457,7 +1445,6 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                                info.column_name_.ptr()))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
-          LOG_INFO("[AI_COL_DBG] task insert", KR(ret), K(i), K(sql.string()));
         }
       }
       das_ctx.is_fk_cascading_ = saved_fk_cascading;
