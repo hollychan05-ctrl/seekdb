@@ -29,7 +29,7 @@
 #include "share/ob_server_struct.h"
 #include "share/ob_thread_pool.h"
 #include "share/schema/ob_schema_utils.h"
-#include "lib/allocator/ob_arena.h"
+#include "lib/allocator/page_arena.h"
 #include "lib/time/ob_time_utility.h"
 #include "common/mysqlclient/ob_mysql_transaction.h"
 
@@ -1042,7 +1042,7 @@ int ObAiColumnWorker::load_tasks(ObArenaAllocator &allocator, ObIArray<AiColumnT
 int ObAiColumnWorker::process_one_group()
 {
   int ret = OB_SUCCESS;
-  ObArenaAllocator allocator("AiColWorker");
+  ObArenaAllocator allocator(ObModIds::OB_MODULE_PAGE_ALLOCATOR, OB_MALLOC_NORMAL_BLOCK_SIZE);
   ObSEArray<AiColumnTask, 8> tasks;
   if (OB_FAIL(load_tasks(allocator, tasks))) {
   } else if (tasks.empty()) {
@@ -1363,7 +1363,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
   const ObDatabaseSchema *db_schema = NULL;
   uint64_t table_loc_id = OB_INVALID_ID;
   uint64_t ref_table_id = OB_INVALID_ID;
-  ObArenaAllocator allocator("AiColReconcile");
+  ObArenaAllocator allocator(ObModIds::OB_MODULE_PAGE_ALLOCATOR, OB_MALLOC_NORMAL_BLOCK_SIZE);
   ObSEArray<ObAiColumnInfo, 4> ai_columns;
   ObSqlString rowkey_prefix;
   bool table_found = false;
