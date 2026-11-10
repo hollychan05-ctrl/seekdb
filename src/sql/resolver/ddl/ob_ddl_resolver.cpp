@@ -34,6 +34,7 @@
 #include "sql/engine/expr/ob_obj_cast_runtime.h"
 #include "sql/engine/expr/ob_expr_ai/ob_ai_func_utils.h"
 #include "sql/resolver/expr/ob_raw_expr_util.h"
+#include "sql/printer/ob_raw_expr_printer.h"
 #include "query/vector/ob_vector_index_util.h"
 
 namespace oceanbase
@@ -2138,6 +2139,18 @@ int ai_column_append_json_string(ObSqlString &sql, const ObString &value)
   return ret;
 }
 
+// render the referenced user column ids as a json array body ("3,7")
+int append_ai_deps_json(ObSqlString &sql, const ObIArray<uint64_t> &dep_column_ids)
+{
+  int ret = OB_SUCCESS;
+  for (int64_t i = 0; OB_SUCC(ret) && i < dep_column_ids.count(); ++i) {
+    if (OB_FAIL(sql.append_fmt("%s%lu", 0 == i ? "" : ",",
+                               dep_column_ids.at(i)))) {
+    }
+  }
+  return ret;
+}
+
 int build_ai_hidden_column(const ObString &ai_column_name,
                            const char *suffix,
                            const ColumnType type,
@@ -2197,6 +2210,8 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
   bool is_embed = false;
   ObString model_name;
   ObString expr_text;
+  ObString prompt_text;
+  ObSEArray<uint64_t, 4> dep_column_ids;
   ObString sync_mode("async");
   int64_t max_retries = 0;
   int64_t func_type_value = 0;
@@ -2290,6 +2305,16 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
       } else if (ref_col->is_hidden()) {
         ret = OB_NOT_SUPPORTED;
         LOG_USER_ERROR(OB_NOT_SUPPORTED, "referencing a hidden column from an AI COLUMN is");
+      } else {
+        // record the dependency so a later UPDATE of this column invalidates the
+        // AI column (see the DML layer).  The dependency list is emitted as the
+        // "deps" json array of the normalized spec.
+        bool exists = false;
+        for (int64_t d = 0; !exists && d < dep_column_ids.count(); ++d) {
+          exists = (dep_column_ids.at(d) == ref_col->get_column_id());
+        }
+        if (!exists && OB_FAIL(dep_column_ids.push_back(ref_col->get_column_id()))) {
+        }
       }
     }
   }
@@ -2340,6 +2365,26 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
     }
   }
 
+  // SQL text of the prompt argument.  The async worker evaluates it against the
+  // row to rebuild the text that is sent to the model.
+  if (OB_SUCC(ret)) {
+    const ObRawExpr *prompt_expr = raw_expr->get_param_expr(1);
+    if (OB_ISNULL(prompt_expr)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      HEAP_VAR(char[OB_MAX_DEFAULT_VALUE_LENGTH], prompt_buf) {
+        int64_t prompt_pos = 0;
+        ObRawExprPrinter expr_printer(prompt_buf, OB_MAX_DEFAULT_VALUE_LENGTH, &prompt_pos,
+                                      schema_checker_->get_schema_guard(), ObObjPrintParams());
+        if (OB_FAIL(expr_printer.do_print(const_cast<ObRawExpr *>(prompt_expr),
+                                          T_NONE_SCOPE, true))) {
+        } else {
+          prompt_text.assign_ptr(prompt_buf, static_cast<int32_t>(prompt_pos));
+        }
+      }
+    }
+  }
+
   if (OB_SUCC(ret)) {
     ObString system_hint;
     if (is_complete) {
@@ -2358,11 +2403,17 @@ int ObDDLResolver::resolve_ai_column_attribute(ObColumnSchemaV2 &column,
         || OB_FAIL(ai_column_append_json_string(spec, model_name))
         || OB_FAIL(spec.append(",\"expr\":"))
         || OB_FAIL(ai_column_append_json_string(spec, expr_text))
+        || OB_FAIL(spec.append(",\"prompt\":"))
+        || OB_FAIL(ai_column_append_json_string(spec, prompt_text))
         || OB_FAIL(spec.append(",\"system\":"))
         || OB_FAIL(ai_column_append_json_string(spec, system_hint))
         || OB_FAIL(spec.append_fmt(",\"max_retries\":%ld,\"sync_mode\":", max_retries))
         || OB_FAIL(ai_column_append_json_string(spec, sync_mode))
-        || OB_FAIL(spec.append_fmt(",\"func_type\":%ld}", func_type_value))) {
+        || OB_FAIL(spec.append_fmt(",\"result_type\":%ld,\"func_type\":%ld",
+                                   static_cast<int64_t>(column.get_data_type()), func_type_value))
+        || OB_FAIL(spec.append(",\"deps\":["))
+        || OB_FAIL(append_ai_deps_json(spec, dep_column_ids))
+        || OB_FAIL(spec.append("]}"))) {
     } else {
       ObString spec_str;
       if (OB_FAIL(ob_write_string(*allocator_, spec.string(), spec_str))) {

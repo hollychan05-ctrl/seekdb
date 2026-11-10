@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX SQL_RESV
 #include "sql/resolver/dml/ob_update_resolver.h"
+#include "sql/engine/expr/ob_expr_ai/ob_ai_func_utils.h"
 
 namespace oceanbase
 {
@@ -109,6 +110,12 @@ int ObUpdateResolver::resolve(const ParseNode &parse_tree)
     // Parse cascading update columns
     if (OB_FAIL(resolve_additional_assignments(tables_assign,
                                                T_UPDATE_SCOPE))) {
+    }
+  }
+
+  // a value change of a column an AI COLUMN depends on invalidates the AI COLUMN
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(inject_ai_column_invalidation(tables_assign))) {
     }
   }
 
@@ -533,6 +540,130 @@ int ObUpdateResolver::resolve_update_constraints()
           }
         }
       }
+    }
+  }
+  return ret;
+}
+
+int ObUpdateResolver::inject_ai_column_invalidation(ObIArray<ObTableAssignment> &tables_assign)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(stmt) || OB_ISNULL(params_.expr_factory_) || OB_ISNULL(params_.allocator_) ||
+      OB_ISNULL(schema_checker_) || OB_ISNULL(session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < tables_assign.count(); ++i) {
+    ObTableAssignment &table_assign = tables_assign.at(i);
+    const TableItem *table_item = stmt->get_table_item_by_id(table_assign.table_id_);
+    const ObTableSchema *table_schema = NULL;
+    if (OB_ISNULL(table_item)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(schema_checker_->get_table_schema(
+                 table_item->get_base_table_item().ref_id_, table_schema))) {
+    } else if (OB_ISNULL(table_schema)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_SUCC(ret) && !table_schema->is_user_table()) {
+      // only user tables can declare AI columns
+    } else {
+      ObSEArray<ObAiColumnInfo, 4> ai_columns;
+      if (OB_FAIL(ObAiColumnUtils::collect_ai_columns(*table_schema, *params_.allocator_, ai_columns))) {
+      } else if (ai_columns.empty()) {
+        // nothing to do
+      } else {
+        // which rowkey columns are written by this statement?
+        bool rowkey_changed = false;
+        for (int64_t a = 0; OB_SUCC(ret) && !rowkey_changed && a < table_assign.assignments_.count(); ++a) {
+          const ObAssignment &assign = table_assign.assignments_.at(a);
+          const ObColumnRefRawExpr *col = assign.column_expr_;
+          const ObColumnSchemaV2 *col_schema = NULL;
+          if (OB_ISNULL(col) || assign.is_implicit_) {
+            // an implicit assignment (generated / on update) cannot invalidate
+          } else if (OB_ISNULL(col_schema = table_schema->get_column_schema(col->get_column_id()))) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (col_schema->is_rowkey_column()) {
+            // a new primary key means a new row: refresh every AI column
+            rowkey_changed = true;
+          }
+        }
+        ObString request_id;
+        if (OB_FAIL(ret) || ai_columns.empty()) {
+        } else if (OB_FAIL(ObAiColumnUtils::generate_request_id(*params_.allocator_, request_id))) {
+        } else {
+          for (int64_t c = 0; OB_SUCC(ret) && c < ai_columns.count(); ++c) {
+            const ObAiColumnInfo &info = ai_columns.at(c);
+            bool need_invalidate = rowkey_changed;
+            for (int64_t a = 0; OB_SUCC(ret) && !need_invalidate && a < table_assign.assignments_.count(); ++a) {
+              const ObAssignment &assign = table_assign.assignments_.at(a);
+              const ObColumnRefRawExpr *col = assign.column_expr_;
+              if (OB_ISNULL(col) || assign.is_implicit_) {
+                // ignored
+              } else if (ObAiColumnUtils::depends_on(info, col->get_column_id())) {
+                need_invalidate = true;
+              }
+            }
+            if (OB_SUCC(ret) && need_invalidate) {
+              const ObColumnSchemaV2 *state_col = table_schema->get_column_schema(info.state_column_id_);
+              const ObColumnSchemaV2 *request_col = table_schema->get_column_schema(info.request_column_id_);
+              const ObColumnSchemaV2 *result_col = table_schema->get_column_schema(info.column_id_);
+              ObConstRawExpr *state_value = NULL;
+              ObConstRawExpr *request_value = NULL;
+              ObRawExpr *null_value = NULL;
+              if (OB_ISNULL(state_col) || OB_ISNULL(request_col) || OB_ISNULL(result_col)) {
+                ret = OB_ERR_UNEXPECTED;
+              } else if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*params_.expr_factory_,
+                                                                      ObIntType, 1, state_value))) {
+              } else if (OB_FAIL(ObRawExprUtils::build_const_string_expr(*params_.expr_factory_,
+                                                                         ObVarcharType, request_id,
+                                                                         CS_TYPE_UTF8MB4_BIN, request_value))) {
+              } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, null_value))) {
+              } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
+                                                          *result_col, null_value))) {
+              } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
+                                                          *state_col, state_value))) {
+              } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
+                                                          *request_col, request_value))) {
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObUpdateResolver::add_ai_column_assignment(ObTableAssignment &table_assign,
+                                               const TableItem &table_item,
+                                               const ObColumnSchemaV2 &column_schema,
+                                               ObRawExpr *value_expr)
+{
+  int ret = OB_SUCCESS;
+  ObDMLStmt *stmt = get_stmt();
+  ObSEArray<ObColumnRefRawExpr *, 1> col_exprs;
+  ColumnItem *col_item = NULL;
+  ObRawExpr *conv_expr = NULL;
+  ObAssignment assignment;
+  if (OB_ISNULL(stmt) || OB_ISNULL(value_expr) || OB_ISNULL(params_.expr_factory_) ||
+      OB_ISNULL(params_.allocator_) || OB_ISNULL(session_info_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(add_column_to_stmt(table_item, column_schema, col_exprs))) {
+  } else if (col_exprs.empty()) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(col_item = stmt->get_column_item_by_id(table_item.table_id_,
+                                                              col_exprs.at(0)->get_column_id()))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(ObRawExprUtils::build_column_conv_expr(*params_.expr_factory_,
+                                                            *params_.allocator_,
+                                                            *col_item->get_expr(),
+                                                            value_expr,
+                                                            session_info_))) {
+  } else if (FALSE_IT(conv_expr = value_expr)) {
+  } else {
+    assignment.column_expr_ = col_item->expr_;
+    assignment.expr_ = conv_expr;
+    assignment.is_implicit_ = true;
+    if (OB_FAIL(table_assign.assignments_.push_back(assignment))) {
     }
   }
   return ret;

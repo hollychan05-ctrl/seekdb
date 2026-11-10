@@ -15,10 +15,14 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include <atomic>
 #include "ob_ai_func_utils.h"
 #include "ob_ai_func_client.h"
 #include "lib/string/ob_string_buffer.h"
+#include "lib/time/ob_time_utility.h"
 #include "query/engine/expr/ob_ai_model_resolver.h"
+#include "share/schema/ob_table_schema.h"
+#include "share/schema/ob_column_schema.h"
 
 namespace oceanbase 
 {
@@ -1391,6 +1395,51 @@ int ObAIFuncModel::call_completion(ObString &prompt, ObJsonObject *config, ObStr
   return ret;
 }
 
+int ObAIFuncModel::call_completion_with_system(ObString &system,
+                                               ObString &content,
+                                               ObJsonObject *config,
+                                               ObString &result)
+{
+  int ret = OB_SUCCESS;
+  ObArray<ObString> headers;
+  ObJsonObject *body = nullptr;
+  ObJsonObject *response = nullptr;
+  ObIJsonBase *result_base = nullptr;
+  ObAIFuncIComplete *complete_provider = nullptr;
+  ObString result_str;
+  ObAIFuncClient client;
+  ObString unencrypted_access_key;
+  ObString request_model_name = get_request_model_name();
+  if (!is_completion_type()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, info type is not completion");
+  } else if (content.empty()) {
+    ret = OB_INVALID_ARGUMENT;
+    LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, input is empty");
+  } else if (OB_FAIL(ObAIFuncUtils::get_complete_provider(*allocator_, endpoint_info_.get_provider(), complete_provider))) {
+  } else if (OB_FAIL(endpoint_info_.get_unencrypted_access_key(*allocator_, unencrypted_access_key))) {
+  } else if (OB_FAIL(complete_provider->get_header(*allocator_, unencrypted_access_key, headers))) {
+  } else if (OB_FAIL(complete_provider->get_body(*allocator_, request_model_name, system, content, config, body))) {
+  } else if (OB_FAIL(client.send_post(*allocator_, endpoint_info_.get_url(), headers, body, response))) {
+  } else if (OB_FAIL(complete_provider->parse_output(*allocator_, response, result_base))) {
+  } else if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(*allocator_, result_base, result_str))) {
+  } else {
+    result = result_str;
+  }
+  if (ret == OB_INVALID_DATA) {
+    ObString response_str;
+    if (OB_SUCCESS == ObAIFuncJsonUtils::print_json_to_str(*allocator_, response, response_str)) {
+      char http_message_str[1024];
+      snprintf(http_message_str, sizeof(http_message_str), "unexpected http message: %s", response_str.ptr());
+      ObString ob_http_message_str(http_message_str);
+      FORWARD_USER_ERROR(ret, ob_http_message_str.ptr());
+    } else {
+      FORWARD_USER_ERROR(ret, "unexpected http message");
+    }
+  }
+  return ret;
+}
+
 int ObAIFuncModel::call_completion_vector(ObArray<ObString> &prompts, ObJsonObject *config, ObArray<ObString> &results)
 {
   int ret = OB_SUCCESS;
@@ -1778,6 +1827,295 @@ const ObString ObAIFuncModel::get_request_model_name()
     request_model_name = endpoint_info_.get_request_model_name();
   }
   return request_model_name;
+}
+
+// locate `"key":` inside the normalized AI COLUMN spec.  The spec is produced
+// by the DDL resolver, no whitespace is emitted between the key and the colon.
+static int find_spec_field(const ObString &spec,
+                           const char *key,
+                           const char *&value_start,
+                           const char *&spec_end)
+{
+  int ret = OB_SUCCESS;
+  value_start = NULL;
+  spec_end = spec.ptr() + spec.length();
+  char pattern[64];
+  int64_t pattern_len = 0;
+  if (OB_ISNULL(key) || OB_ISNULL(spec.ptr())) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(databuff_printf(pattern, sizeof(pattern), pattern_len, "\"%s\":", key))) {
+  } else {
+    const int64_t spec_len = spec.length();
+    for (int64_t i = 0; NULL == value_start && i + pattern_len <= spec_len; ++i) {
+      if (0 == MEMCMP(spec.ptr() + i, pattern, pattern_len)) {
+        value_start = spec.ptr() + i + pattern_len;
+      }
+    }
+    if (NULL == value_start) {
+      ret = OB_ENTRY_NOT_EXIST;
+    }
+  }
+  return ret;
+}
+
+// copy the JSON string that starts at *value_start into %value, undoing the
+// escaping performed when the spec was written.
+static int read_json_string_value(const char *value_start,
+                                  const char *spec_end,
+                                  ObIAllocator &allocator,
+                                  ObString &value)
+{
+  int ret = OB_SUCCESS;
+  value.reset();
+  if (value_start >= spec_end || '"' != *value_start) {
+    ret = OB_INVALID_DATA;
+  } else {
+    const char *cur = value_start + 1;
+    const char *end = cur;
+    while (end < spec_end) {
+      if ('\\' == *end) {
+        end += 2;
+        continue;
+      }
+      if ('"' == *end) {
+        break;
+      }
+      ++end;
+    }
+    if (end >= spec_end) {
+      ret = OB_INVALID_DATA;
+    } else {
+      const int64_t raw_len = end - cur;
+      char *buf = static_cast<char *>(allocator.alloc(raw_len + 1));
+      if (OB_ISNULL(buf)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        int64_t out_pos = 0;
+        for (int64_t i = 0; OB_SUCC(ret) && i < raw_len; ++i) {
+          if ('\\' == cur[i] && i + 1 < raw_len) {
+            ++i;
+            switch (cur[i]) {
+              case 'n': buf[out_pos++] = '\n'; break;
+              case 'r': buf[out_pos++] = '\r'; break;
+              case 't': buf[out_pos++] = '\t'; break;
+              case '"': buf[out_pos++] = '"'; break;
+              case '\\': buf[out_pos++] = '\\'; break;
+              case '/': buf[out_pos++] = '/'; break;
+              default: buf[out_pos++] = cur[i]; break;
+            }
+          } else {
+            buf[out_pos++] = cur[i];
+          }
+        }
+        buf[out_pos] = '\0';
+        value.assign_ptr(buf, static_cast<int32_t>(out_pos));
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAiColumnUtils::read_spec_string(const ObString &spec,
+                                      const char *key,
+                                      ObIAllocator &allocator,
+                                      ObString &value)
+{
+  int ret = OB_SUCCESS;
+  const char *value_start = NULL;
+  const char *spec_end = NULL;
+  if (OB_FAIL(find_spec_field(spec, key, value_start, spec_end))) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
+      value.reset();
+    }
+  } else if (OB_FAIL(read_json_string_value(value_start, spec_end, allocator, value))) {
+  }
+  return ret;
+}
+
+int ObAiColumnUtils::read_spec_int(const ObString &spec, const char *key, int64_t &value)
+{
+  int ret = OB_SUCCESS;
+  const char *value_start = NULL;
+  const char *spec_end = NULL;
+  value = 0;
+  if (OB_FAIL(find_spec_field(spec, key, value_start, spec_end))) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
+    }
+  } else {
+    bool negative = false;
+    const char *cur = value_start;
+    if (cur < spec_end && '-' == *cur) {
+      negative = true;
+      ++cur;
+    }
+    for (; cur < spec_end && *cur >= '0' && *cur <= '9'; ++cur) {
+      value = value * 10 + (*cur - '0');
+    }
+    if (negative) {
+      value = -value;
+    }
+  }
+  return ret;
+}
+
+int ObAiColumnUtils::read_spec_uint_array(const ObString &spec,
+                                          const char *key,
+                                          ObIArray<uint64_t> &values)
+{
+  int ret = OB_SUCCESS;
+  const char *value_start = NULL;
+  const char *spec_end = NULL;
+  if (OB_FAIL(find_spec_field(spec, key, value_start, spec_end))) {
+    if (OB_ENTRY_NOT_EXIST == ret) {
+      ret = OB_SUCCESS;
+    }
+  } else if (value_start >= spec_end || '[' != *value_start) {
+    ret = OB_INVALID_DATA;
+  } else {
+    const char *cur = value_start + 1;
+    while (OB_SUCC(ret) && cur < spec_end && ']' != *cur) {
+      if (*cur < '0' || *cur > '9') {
+        ++cur;
+      } else {
+        uint64_t v = 0;
+        while (cur < spec_end && *cur >= '0' && *cur <= '9') {
+          v = v * 10 + static_cast<uint64_t>(*cur - '0');
+          ++cur;
+        }
+        if (OB_FAIL(values.push_back(v))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// read the three hidden columns of one AI COLUMN out of the table schema
+static int build_ai_column_info(const share::schema::ObTableSchema &table,
+                                const share::schema::ObColumnSchemaV2 &ai_column,
+                                ObIAllocator &allocator,
+                                ObAiColumnInfo &info)
+{
+  int ret = OB_SUCCESS;
+  using namespace share::schema;
+  const ObString &ai_name = ai_column.get_column_name_str();
+  info.column_name_ = ai_name;
+  info.column_id_ = ai_column.get_column_id();
+  info.result_type_ = ai_column.get_data_type();
+  info.state_column_id_ = OB_INVALID_ID;
+  info.request_column_id_ = OB_INVALID_ID;
+  info.result_spec_column_id_ = OB_INVALID_ID;
+  for (ObTableSchema::const_column_iterator iter = table.column_begin();
+       OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column) || !column->is_hidden()) {
+      // not a hidden column
+    } else if (AiColumnHiddenColumn::is_hidden_column_of(
+                 column->get_column_name_str(), ai_name, AiColumnHiddenColumn::STATE_SUFFIX)) {
+      info.state_column_id_ = column->get_column_id();
+    } else if (AiColumnHiddenColumn::is_hidden_column_of(
+                 column->get_column_name_str(), ai_name, AiColumnHiddenColumn::REQUEST_SUFFIX)) {
+      info.request_column_id_ = column->get_column_id();
+    } else if (AiColumnHiddenColumn::is_hidden_column_of(
+                 column->get_column_name_str(), ai_name, AiColumnHiddenColumn::RESULT_SPEC_SUFFIX)) {
+      info.result_spec_column_id_ = column->get_column_id();
+      const ObString &spec = column->get_comment_str();
+      if (OB_FAIL(ObAiColumnUtils::read_spec_string(spec, "model", allocator, info.model_))) {
+      } else if (OB_FAIL(ObAiColumnUtils::read_spec_string(spec, "prompt", allocator, info.prompt_))) {
+      } else if (OB_FAIL(ObAiColumnUtils::read_spec_string(spec, "system", allocator, info.system_))) {
+      } else if (OB_FAIL(ObAiColumnUtils::read_spec_string(spec, "sync_mode", allocator, info.sync_mode_))) {
+      } else if (OB_FAIL(ObAiColumnUtils::read_spec_int(spec, "func_type", info.func_type_))) {
+      } else if (OB_FAIL(ObAiColumnUtils::read_spec_int(spec, "max_retries", info.max_retries_))) {
+      } else if (OB_FAIL(ObAiColumnUtils::read_spec_int(spec, "result_type", info.result_type_))) {
+      } else {
+        ObSEArray<uint64_t, 4> deps;
+        if (OB_FAIL(ObAiColumnUtils::read_spec_uint_array(spec, "deps", deps))) {
+        } else {
+          info.dep_count_ = 0;
+          for (int64_t i = 0; OB_SUCC(ret) && i < deps.count(); ++i) {
+            if (info.dep_count_ < ObAiColumnInfo::MAX_AI_COLUMN_DEPS) {
+              info.deps_[info.dep_count_++] = deps.at(i);
+            }
+          }
+        }
+      }
+    }
+  }
+  if (OB_SUCC(ret)
+      && (OB_INVALID_ID == info.state_column_id_
+          || OB_INVALID_ID == info.request_column_id_
+          || OB_INVALID_ID == info.result_spec_column_id_)) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai column hidden columns are incomplete", KR(ret), K(ai_name));
+  }
+  return ret;
+}
+
+int ObAiColumnUtils::collect_ai_columns(const share::schema::ObTableSchema &table,
+                                        ObIAllocator &allocator,
+                                        ObIArray<ObAiColumnInfo> &ai_columns)
+{
+  int ret = OB_SUCCESS;
+  for (share::schema::ObTableSchema::const_column_iterator iter = table.column_begin();
+       OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+    const share::schema::ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column) || !column->is_ai_column()) {
+      // not an ai column
+    } else {
+      ObAiColumnInfo info;
+      if (OB_FAIL(build_ai_column_info(table, *column, allocator, info))) {
+      } else if (OB_FAIL(ai_columns.push_back(info))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObAiColumnUtils::find_ai_column(const share::schema::ObTableSchema &table,
+                                    ObIAllocator &allocator,
+                                    const uint64_t column_id,
+                                    ObAiColumnInfo &info,
+                                    bool &found)
+{
+  int ret = OB_SUCCESS;
+  found = false;
+  for (share::schema::ObTableSchema::const_column_iterator iter = table.column_begin();
+       OB_SUCC(ret) && !found && iter != table.column_end(); ++iter) {
+    const share::schema::ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column) || !column->is_ai_column() || column->get_column_id() != column_id) {
+      // not the target
+    } else if (OB_FAIL(build_ai_column_info(table, *column, allocator, info))) {
+    } else {
+      found = true;
+    }
+  }
+  return ret;
+}
+
+bool ObAiColumnUtils::depends_on(const ObAiColumnInfo &info, const uint64_t column_id)
+{
+  bool found = false;
+  for (int64_t i = 0; !found && i < info.dep_count_; ++i) {
+    found = (info.deps_[i] == column_id);
+  }
+  return found;
+}
+
+int ObAiColumnUtils::generate_request_id(ObIAllocator &allocator, ObString &request_id)
+{
+  int ret = OB_SUCCESS;
+  static std::atomic<uint64_t> seq(0);
+  char buf[96];
+  int64_t pos = 0;
+  const uint64_t cur = seq.fetch_add(1) + 1;
+  request_id.reset();
+  if (OB_FAIL(databuff_printf(buf, sizeof(buf), pos, "ai%ld_%lu_%lu",
+                              ObTimeUtility::current_time(), static_cast<uint64_t>(GETTID()), cur))) {
+  } else if (OB_FAIL(ob_write_string(allocator, ObString(static_cast<int32_t>(pos), buf), request_id))) {
+  }
+  return ret;
 }
 
 } // namespace common

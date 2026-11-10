@@ -23,8 +23,89 @@
 
 namespace oceanbase 
 {
+namespace share
+{
+namespace schema
+{
+class ObTableSchema;
+}
+}
 namespace common 
 {
+
+// Runtime description of one AI COLUMN: the user visible result column plus the
+// three hidden columns that carry its per row state machine.  It is rebuilt
+// from the table schema alone: the hidden result_spec column keeps the
+// normalized JSON of the AI COLUMN definition in its comment.
+struct ObAiColumnInfo
+{
+  static const int64_t MAX_AI_COLUMN_DEPS = 16;
+  ObAiColumnInfo()
+    : column_name_(), model_(), prompt_(), system_(), sync_mode_(),
+      column_id_(OB_INVALID_ID), state_column_id_(OB_INVALID_ID),
+      request_column_id_(OB_INVALID_ID), result_spec_column_id_(OB_INVALID_ID),
+      func_type_(0), max_retries_(0), result_type_(ObMaxType),
+      within_limit_(false), dep_count_(0)
+  {
+    MEMSET(deps_, 0, sizeof(deps_));
+  }
+  // share::EndpointType::DENSE_EMBEDDING == 1, COMPLETION == 3
+  bool is_embedd() const { return 1 == func_type_; }
+  bool is_completion() const { return 3 == func_type_; }
+  TO_STRING_KV(K_(column_name), K_(column_id), K_(state_column_id), K_(request_column_id),
+               K_(result_spec_column_id), K_(model), K_(prompt), K_(system),
+               K_(func_type), K_(max_retries), K_(result_type), K_(dep_count));
+  common::ObString column_name_;
+  common::ObString model_;
+  // SQL text of the prompt expression, e.g. "concat('Classify: ', `content`)"
+  common::ObString prompt_;
+  common::ObString system_;
+  common::ObString sync_mode_;
+  uint64_t column_id_;
+  uint64_t state_column_id_;
+  uint64_t request_column_id_;
+  uint64_t result_spec_column_id_;
+  int64_t func_type_;
+  int64_t max_retries_;
+  int64_t result_type_;
+  bool within_limit_;
+  int64_t dep_count_;
+  uint64_t deps_[MAX_AI_COLUMN_DEPS];
+};
+
+// Reads the AI COLUMN definitions of a table out of its schema.
+class ObAiColumnUtils
+{
+public:
+  ObAiColumnUtils() {}
+  virtual ~ObAiColumnUtils() {}
+  // Collect every AI COLUMN of %table, ordered by column id.
+  static int collect_ai_columns(const share::schema::ObTableSchema &table,
+                                common::ObIAllocator &allocator,
+                                common::ObIArray<ObAiColumnInfo> &ai_columns);
+  static int find_ai_column(const share::schema::ObTableSchema &table,
+                            common::ObIAllocator &allocator,
+                            const uint64_t column_id,
+                            ObAiColumnInfo &info,
+                            bool &found);
+  // minimal reader of the normalized JSON kept in the result spec comment
+  static int read_spec_string(const common::ObString &spec,
+                              const char *key,
+                              common::ObIAllocator &allocator,
+                              common::ObString &value);
+  static int read_spec_int(const common::ObString &spec, const char *key, int64_t &value);
+  static int read_spec_uint_array(const common::ObString &spec,
+                                  const char *key,
+                                  common::ObIArray<uint64_t> &values);
+  // true when %column_id is one of the dependencies of %info
+  static bool depends_on(const ObAiColumnInfo &info, const uint64_t column_id);
+  // A fresh request id.  Every invalidation statement stamps it on the rows it
+  // touches; the worker only writes a result while the stamped id still matches,
+  // which makes a late result of a superseded request a no-op.
+  static int generate_request_id(common::ObIAllocator &allocator, common::ObString &request_id);
+private:
+  DISALLOW_COPY_AND_ASSIGN(ObAiColumnUtils);
+};
 
 class ObOpenAIUtils 
 {
@@ -353,6 +434,10 @@ public:
    virtual ~ObAIFuncModel() {}
    // completion
    int call_completion(ObString &prompt, ObJsonObject *config, ObString &result);
+   // like call_completion() but the caller controls the system message.  The AI
+   // COLUMN worker needs it to pass the result type instruction (json / integer)
+   // that the mock and the real providers expect.
+   int call_completion_with_system(ObString &system, ObString &content, ObJsonObject *config, ObString &result);
    int call_completion_vector(ObArray<ObString> &prompts, ObJsonObject *config, ObArray<ObString> &results);
    // dense_embedding
    int call_dense_embedding(ObString &content, ObJsonObject *config, ObString &result);

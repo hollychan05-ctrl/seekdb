@@ -2503,9 +2503,9 @@ all_ai_column_def = dict(
 def_table_schema(**all_ai_column_def)
 
 
-# Pending/in-flight AI COLUMN computation tasks. A task row shares the same
-# request_id as its sibling tasks so a whole row of AI columns is applied
-# atomically by the worker.
+# Pending/in-flight AI COLUMN computation tasks: one row per (table, AI column,
+# row). The task rows of one row share the same request_id, so the worker
+# applies a whole row of AI columns atomically.
 all_ai_column_task_def = dict(
     owner = 'holly',
     table_name = '__all_ai_column_task',
@@ -2513,16 +2513,15 @@ all_ai_column_task_def = dict(
     table_type = 'SYSTEM_TABLE',
     gm_columns = ['gmt_create', 'gmt_modified'],
     rowkey_columns = [
-      ('task_id', 'int')
+      ('table_id', 'int'),
+      ('column_id', 'int'),
+      ('rowkey_predicate', 'varchar:1024')
     ],
 
     is_cluster_private = False,
     meta_record_in_sys = False,
     normal_columns = [
-        ('table_id', 'int', 'false'),
-        ('column_id', 'int', 'false'),
         ('request_id', 'varchar:64', 'true'),
-        ('rowkey_predicate', 'varchar:1024', 'true'),
         ('eligible_ts', 'timestamp:6', 'true'),
         ('state', 'int', 'false'),
         ('retry_count', 'int', 'false')

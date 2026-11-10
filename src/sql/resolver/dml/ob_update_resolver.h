@@ -58,6 +58,13 @@ private:
   int check_safe_update_mode(ObUpdateStmt *update_stmt);
   int resolve_update_constraints();
   int generate_batched_stmt_info();
+  // An UPDATE of a column an AI COLUMN depends on invalidates that AI COLUMN:
+  // its value is cleared and its hidden state/request columns are refreshed.
+  int inject_ai_column_invalidation(common::ObIArray<ObTableAssignment> &tables_assign);
+  int add_ai_column_assignment(ObTableAssignment &table_assign,
+                               const TableItem &table_item,
+                               const share::schema::ObColumnSchemaV2 &column_schema,
+                               ObRawExpr *value_expr);
 };
 
 } // namespace sql
