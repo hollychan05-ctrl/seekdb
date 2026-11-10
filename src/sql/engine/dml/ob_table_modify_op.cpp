@@ -1387,6 +1387,13 @@ int reconcile_ai_columns(ObTableModifyOp &op)
     } else if (OB_FAIL(ObAiColumnUtils::generate_request_id(allocator, request_id))) {
     } else if (OB_FAIL(op.open_inner_conn())) {
     } else {
+      // The statements below are executed inside a statement that is still
+      // running, i.e. they are nested SQL.  Marking the context as a cascading
+      // DML is what makes the engine treat them as nested (it must not touch
+      // the session level statement state of the outer statement).
+      ObDASCtx &das_ctx = ctx.get_das_ctx();
+      const bool saved_fk_cascading = das_ctx.is_fk_cascading_;
+      das_ctx.is_fk_cascading_ = true;
       ObString db_name = db_schema->get_database_name_str();
       ObString table_name = table_schema->get_table_name_str();
       ObSEArray<ObColDesc, 4> rowkey_cols;
@@ -1442,6 +1449,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
           LOG_INFO("[AI_COL_DBG] task insert", KR(ret), K(i), K(sql.string()));
         }
       }
+      das_ctx.is_fk_cascading_ = saved_fk_cascading;
       int end_ret = op.end_nested_session();
       if (OB_SUCCESS != end_ret && OB_SUCCESS == ret) {
         ret = end_ret;
