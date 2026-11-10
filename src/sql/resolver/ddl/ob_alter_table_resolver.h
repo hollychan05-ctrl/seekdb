@@ -50,6 +50,9 @@ public:
   virtual ~ObAlterTableResolver();
   virtual int resolve(const ParseNode &parse_tree);
   int resolve_action_list(const ParseNode &node);
+  // `ALTER TABLE ... RETRY AI COLUMN <col> [WHERE <pred>]` clears the AI COLUMN of
+  // the selected rows; it does not change the schema at all.
+  int resolve_ai_column_retry(const ParseNode &retry_node);
   int resolve_column_options(const ParseNode &node,
                              bool &is_modify_column_visibility,
                              bool &is_drop_column,

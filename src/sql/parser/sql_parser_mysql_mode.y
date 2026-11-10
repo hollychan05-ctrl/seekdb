@@ -337,7 +337,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING RETRY REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -14886,6 +14886,16 @@ DROP CONSTRAINT constraint_name
   (void)($3);
   $$ = NULL;
 }
+| RETRY AI COLUMN column_name opt_where
+{
+  ParseNode *retry_node = NULL;
+  malloc_non_terminal_node(retry_node, result->malloc_pool_, T_AI_COLUMN_RETRY, 3, $4, $5, NULL);
+  if (NULL != $5) {
+    check_ret(setup_token_pos_info_and_dup_string(retry_node->children_[2], result,
+                                                  @5.first_column, @5.last_column), &@1, result);
+  }
+  $$ = retry_node;
+}
 ;
 
 algorithm_opt:
@@ -18200,6 +18210,7 @@ ACCOUNT
 |       RESUME
 |       RETURNED_SQLSTATE
 |       RETURNING
+|       RETRY
 |       RETURNS
 |       REVERSE
 |       REWRITE

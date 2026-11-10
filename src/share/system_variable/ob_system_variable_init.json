@@ -10988,5 +10988,18 @@
     "info_cn": "",
     "background_cn": "",
     "ref_url": ""
+  },
+  "ai_column_strict_read": {
+    "id": 10755,
+    "name": "ai_column_strict_read",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "When on, a statement that reads an AI COLUMN is rejected while the column still has rows that are not ready. Off by default.",
+    "flags": "SESSION | GLOBAL | INFLUENCE_PLAN",
+    "publish_version": "",
+    "info_cn": "",
+    "background_cn": "",
+    "ref_url": ""
   }
 }

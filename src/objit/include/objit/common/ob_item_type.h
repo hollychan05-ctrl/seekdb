@@ -1582,7 +1582,8 @@ typedef enum ObItemType
   T_RESERVED_3999 = 3999,
   // one `name = value` entry of an AI COLUMN WITH(...) clause
   T_AI_COLUMN_OPTION = 4000,
-  T_RESERVED_4001 = 4001,
+  // ALTER TABLE ... RETRY AI COLUMN <name> [WHERE <pred>]
+  T_AI_COLUMN_RETRY = 4001,
   T_RESERVED_4002 = 4002,
   T_RESERVED_4003 = 4003,
   T_RESERVED_4004 = 4004,

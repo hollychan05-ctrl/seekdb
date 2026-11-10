@@ -42,6 +42,9 @@
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
 #include "sql/engine/basic/ob_file_scan_utils.h"
+#include "sql/engine/expr/ob_expr_ai/ob_ai_func_utils.h"
+#include "share/ob_server_struct.h"
+#include "common/mysqlclient/ob_mysql_proxy.h"
 
 namespace oceanbase
 {
@@ -1777,6 +1780,77 @@ int ObDMLResolver::resolve_into_variables(const ParseNode *node,
   return ret;
 }
 
+namespace {
+// Strict reads of an AI COLUMN (`ai_column_strict_read`) reject a statement while
+// the referenced AI COLUMN still has rows that are not ready.  The probe is a SQL
+// over the very table it inspects, so it must not be strict checked itself; the
+// nested statement is resolved on the same thread, hence the thread guard.
+thread_local bool g_ai_column_strict_probe = false;
+
+int check_ai_column_strict_read(ObSchemaChecker &schema_checker,
+                                ObSQLSessionInfo &session,
+                                const TableItem &table_item,
+                                const ColumnItem &column_item)
+{
+  int ret = OB_SUCCESS;
+  bool enabled = false;
+  const ObTableSchema *table_schema = NULL;
+  const ObDatabaseSchema *db_schema = NULL;
+  ObArenaAllocator allocator(ObModIds::OB_MODULE_PAGE_ALLOCATOR, OB_MALLOC_NORMAL_BLOCK_SIZE);
+  ObAiColumnInfo info;
+  bool found = false;
+  if (g_ai_column_strict_probe) {
+    // the probe itself, do not recurse
+  } else if (OB_UNLIKELY(OB_INVALID_ID == table_item.ref_id_
+                         || OB_INVALID_ID == column_item.column_id_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(session.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, enabled))) {
+  } else if (!enabled) {
+    // strict read is off, the default
+  } else if (OB_UNLIKELY(!table_item.is_basic_table())) {
+    // a generated table hides the base table it reads from
+  } else if (OB_FAIL(schema_checker.get_table_schema(table_item.ref_id_, table_schema))
+             || OB_ISNULL(table_schema)) {
+  } else if (OB_FAIL(ObAiColumnUtils::find_ai_column(*table_schema, allocator,
+                                                    column_item.column_id_, info, found))) {
+  } else if (!found) {
+    // an ordinary column
+  } else if (OB_FAIL(schema_checker.get_database_schema(table_schema->get_database_id(), db_schema))
+             || OB_ISNULL(db_schema)) {
+  } else {
+    ObSqlString sql;
+    int64_t null_row_count = 0;
+    if (OB_FAIL(sql.append_fmt(
+            "SELECT /*+ DYNAMIC_SAMPLING(0) */ count(*) FROM `%.*s`.`%.*s` WHERE `%.*s` IS NULL",
+            db_schema->get_database_name_str().length(), db_schema->get_database_name_str().ptr(),
+            table_schema->get_table_name_str().length(), table_schema->get_table_name_str().ptr(),
+            info.column_name_.length(), info.column_name_.ptr()))) {
+    } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+      ret = OB_NOT_INIT;
+    } else {
+      g_ai_column_strict_probe = true;
+      SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+        ObMySQLResult *result_set = NULL;
+        if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
+        } else if (OB_ISNULL(result_set = res.get_result())) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (OB_FAIL(result_set->next())) {
+        } else if (OB_FAIL(result_set->get_int(static_cast<int64_t>(0), null_row_count))) {
+        }
+      }
+      g_ai_column_strict_probe = false;
+      if (OB_SUCC(ret) && null_row_count > 0) {
+        ret = OB_AI_COLUMN_UNFINISHED_TASK;
+        LOG_USER_ERROR(OB_AI_COLUMN_UNFINISHED_TASK,
+                       static_cast<int64_t>(table_schema->get_table_id()),
+                       static_cast<int64_t>(info.column_id_));
+      }
+    }
+  }
+  return ret;
+}
+}  // anonymous namespace
+
 //used to find column in all namespace
 //search column ref in table columns
 //update, delete, insert only has basic table column
@@ -1959,6 +2033,12 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
       } else {
         col_item = stmt->get_column_item(stmt->get_column_size() - 1);
       }
+    }
+  }
+  // a statement that reads an AI COLUMN may be rejected in strict mode
+  if (OB_SUCC(ret) && NULL != col_item) {
+    if (OB_FAIL(check_ai_column_strict_read(*schema_checker_, *session_info_, table_item, *col_item))) {
+      LOG_WARN("failed to check the ai column strict read", KR(ret));
     }
   }
   return ret;
