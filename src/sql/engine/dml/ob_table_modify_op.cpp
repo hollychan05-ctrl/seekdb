@@ -1398,6 +1398,51 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                  || 1 != rowkey_cols.count()
                  || OB_ISNULL(pk_col = table_schema->get_column_schema(rowkey_cols.at(0).col_id_))) {
         ret = OB_NOT_SUPPORTED;
+      } else if (getenv("AI_COLUMN_PROBE") != NULL) {
+        const ObAiColumnInfo &probe_info = ai_columns.at(0);
+        const char *probes[] = {
+          "UPDATE %s%s SET request_id = 'probe' WHERE table_id = %lu AND column_id = %lu",
+          "DELETE %sFROM %s WHERE table_id = %lu AND column_id = %lu",
+          "REPLACE %sINTO %s (table_id, column_id, request_id, rowkey_predicate, eligible_ts, "
+          "state, retry_count) SELECT %lu, %lu, 'r1', CONCAT('%s', `%s`), now(6), 0, 0 "
+          "FROM `%s`.`%s`",
+          "SELECT %sCONCAT('%s', `%s`) FROM `%s`.`%s`",
+          "DELETE %sFROM %s WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate "
+          "NOT IN (SELECT CONCAT('%s', `%s`) FROM `%s`.`%s`)",
+        };
+        for (int64_t p = 0; p < 5; ++p) {
+          ObSqlString sql;
+          int pretr = OB_SUCCESS;
+          if (0 == p) {
+            pretr = sql.append_fmt(probes[p], AI_NO_DS_HINT, AI_TASK_TNAME,
+                                   table_schema->get_table_id(), probe_info.column_id_);
+          } else if (1 == p) {
+            pretr = sql.append_fmt(probes[p], AI_NO_DS_HINT, AI_TASK_TNAME,
+                                   table_schema->get_table_id(), probe_info.column_id_);
+          } else if (2 == p) {
+            pretr = sql.append_fmt(probes[p], AI_NO_DS_HINT, AI_TASK_TNAME,
+                                   table_schema->get_table_id(), probe_info.column_id_,
+                                   rowkey_prefix.string().ptr(),
+                                   pk_col->get_column_name_str().ptr(),
+                                   db_name.ptr(), table_name.ptr());
+          } else if (3 == p) {
+            pretr = sql.append_fmt(probes[p], AI_NO_DS_HINT, rowkey_prefix.string().ptr(),
+                                   pk_col->get_column_name_str().ptr(),
+                                   db_name.ptr(), table_name.ptr());
+          } else {
+            pretr = sql.append_fmt(probes[p], AI_NO_DS_HINT, AI_TASK_TNAME,
+                                   table_schema->get_table_id(), probe_info.column_id_,
+                                   rowkey_prefix.string().ptr(),
+                                   pk_col->get_column_name_str().ptr(),
+                                   db_name.ptr(), table_name.ptr());
+          }
+          int wret = pretr;
+          if (OB_SUCC(pretr)) {
+            wret = op.execute_write(sql.ptr());
+          }
+          LOG_INFO("[AI_COL_PROBE]", "idx", p, "build", pretr, "write", wret,
+                   K(sql.string()));
+        }
       } else {
         for (int64_t i = 0; OB_SUCC(ret) && i < ai_columns.count(); ++i) {
           ObSqlString sql;
