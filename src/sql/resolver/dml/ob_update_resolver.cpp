@@ -586,44 +586,28 @@ int ObUpdateResolver::inject_ai_column_invalidation(ObIArray<ObTableAssignment> 
             rowkey_changed = true;
           }
         }
-        ObString request_id;
-        if (OB_FAIL(ret) || ai_columns.empty()) {
-        } else if (OB_FAIL(ObAiColumnUtils::generate_request_id(*params_.allocator_, request_id))) {
-        } else {
-          for (int64_t c = 0; OB_SUCC(ret) && c < ai_columns.count(); ++c) {
-            const ObAiColumnInfo &info = ai_columns.at(c);
-            bool need_invalidate = rowkey_changed;
-            for (int64_t a = 0; OB_SUCC(ret) && !need_invalidate && a < table_assign.assignments_.count(); ++a) {
-              const ObAssignment &assign = table_assign.assignments_.at(a);
-              const ObColumnRefRawExpr *col = assign.column_expr_;
-              if (OB_ISNULL(col) || assign.is_implicit_) {
-                // ignored
-              } else if (ObAiColumnUtils::depends_on(info, col->get_column_id())) {
-                need_invalidate = true;
-              }
+        for (int64_t c = 0; OB_SUCC(ret) && c < ai_columns.count(); ++c) {
+          const ObAiColumnInfo &info = ai_columns.at(c);
+          bool need_invalidate = rowkey_changed;
+          for (int64_t a = 0; OB_SUCC(ret) && !need_invalidate && a < table_assign.assignments_.count(); ++a) {
+            const ObAssignment &assign = table_assign.assignments_.at(a);
+            const ObColumnRefRawExpr *col = assign.column_expr_;
+            if (OB_ISNULL(col) || assign.is_implicit_) {
+              // ignored
+            } else if (ObAiColumnUtils::depends_on(info, col->get_column_id())) {
+              need_invalidate = true;
             }
-            if (OB_SUCC(ret) && need_invalidate) {
-              const ObColumnSchemaV2 *state_col = table_schema->get_column_schema(info.state_column_id_);
-              const ObColumnSchemaV2 *request_col = table_schema->get_column_schema(info.request_column_id_);
-              const ObColumnSchemaV2 *result_col = table_schema->get_column_schema(info.column_id_);
-              ObConstRawExpr *state_value = NULL;
-              ObConstRawExpr *request_value = NULL;
-              ObRawExpr *null_value = NULL;
-              if (OB_ISNULL(state_col) || OB_ISNULL(request_col) || OB_ISNULL(result_col)) {
-                ret = OB_ERR_UNEXPECTED;
-              } else if (OB_FAIL(ObRawExprUtils::build_const_int_expr(*params_.expr_factory_,
-                                                                      ObIntType, 1, state_value))) {
-              } else if (OB_FAIL(ObRawExprUtils::build_const_string_expr(*params_.expr_factory_,
-                                                                         ObVarcharType, request_id,
-                                                                         CS_TYPE_UTF8MB4_BIN, request_value))) {
-              } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, null_value))) {
-              } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
-                                                          *result_col, null_value))) {
-              } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
-                                                          *state_col, state_value))) {
-              } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
-                                                          *request_col, request_value))) {
-              }
+          }
+          if (OB_SUCC(ret) && need_invalidate) {
+            // Clearing the AI COLUMN marks it as "not ready"; the reconciliation
+            // that runs once the statement has been written picks it up.
+            const ObColumnSchemaV2 *result_col = table_schema->get_column_schema(info.column_id_);
+            ObRawExpr *null_value = NULL;
+            if (OB_ISNULL(result_col)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(ObRawExprUtils::build_null_expr(*params_.expr_factory_, null_value))) {
+            } else if (OB_FAIL(add_ai_column_assignment(table_assign, *table_item,
+                                                        *result_col, null_value))) {
             }
           }
         }

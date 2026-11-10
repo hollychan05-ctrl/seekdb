@@ -805,25 +805,21 @@ int ObTableModifyOp::inner_switch_iterator()
 // ---------------------------------------------------------------------------
 // AI COLUMN support
 //
-// Every AI COLUMN owns three hidden columns (state / request / result spec).  A
-// DML statement that touches a row an AI COLUMN depends on invalidates it: the
-// hidden state is set to PENDING and the hidden request column is stamped with
-// a fresh request id.  Once the statement has been written, the reconciliation
-// below turns every PENDING row into a task of __all_ai_column_task; a
-// background worker then evaluates the AI function and writes the result back,
-// guarded by the request id so a superseded result can never win.
+// An AI COLUMN is filled asynchronously.  A DML statement that changes a column
+// an AI COLUMN depends on clears the AI COLUMN (it becomes NULL, "not ready")
+// and, once the statement has been written, the reconciliation below turns
+// every clear AI COLUMN into a task row of __all_ai_column_task -- in the very
+// transaction of the DML statement, so a rollback rolls the tasks back too.
+// A background worker evaluates the AI function of pending tasks and publishes
+// the result.  A worker only publishes after it has removed its own task rows
+// inside the publishing transaction, which makes a result computed for a
+// superseded request a no-op.
 // ---------------------------------------------------------------------------
 namespace {
 
 using namespace oceanbase::share::schema;
 
 const char *const AI_TASK_TNAME = "oceanbase.__all_ai_column_task";
-
-// row state machine, mirrored in the hidden state column and in the STATUS
-// pseudo column of `ALTER TABLE ... RETRY AI COLUMN`
-const int64_t AI_STATE_READY = 0;
-const int64_t AI_STATE_PENDING = 1;
-const int64_t AI_STATE_FAILED = 3;
 // task state machine
 const int64_t AI_TASK_PENDING = 0;
 const int64_t AI_TASK_RETRYING = 3;
@@ -855,8 +851,8 @@ int ai_append_sql_string(ObSqlString &sql, const ObString &value)
   return ret;
 }
 
-// `` `id` = ``.  The rowkey value itself is concatenated by the SQL that
-// creates the tasks, so the worker and the reconciler agree on the text.
+// `` `id` = ``.  The rowkey value itself is concatenated by the SQL that creates
+// the tasks, so the worker and the reconciler agree on the exact text.
 int ai_build_rowkey_prefix(const ObTableSchema &table, ObSqlString &prefix)
 {
   int ret = OB_SUCCESS;
@@ -920,8 +916,7 @@ struct AiColumnTask
 };
 
 // --------------------------------------------------------------------------
-// The background worker: it evaluates the AI function of pending task rows and
-// publishes the results back into the user table.
+// The background worker.
 // --------------------------------------------------------------------------
 class ObAiColumnWorker : public share::ObThreadPool
 {
@@ -979,19 +974,19 @@ private:
                     const AiColumnTask &task,
                     const ObAiColumnInfo &info,
                     common::ObString &result);
-  int commit_group(const share::schema::ObTableSchema &table,
-                   const ObDatabaseSchema &db,
-                   const ObIArray<AiColumnTask> &tasks,
-                   const int64_t group_begin,
-                   const int64_t group_end,
-                   ObIArray<ObAiColumnInfo> &matched,
-                   ObIArray<ObString> &results);
-  int handle_group_failure(const share::schema::ObTableSchema &table,
-                           const ObDatabaseSchema &db,
-                           const ObIArray<AiColumnTask> &tasks,
-                           const int64_t group_begin,
-                           const int64_t group_end,
-                           ObIArray<ObAiColumnInfo> &matched);
+  int publish_group(const share::schema::ObTableSchema &table,
+                    const share::schema::ObDatabaseSchema &db,
+                    const ObIArray<AiColumnTask> &tasks,
+                    const int64_t group_begin,
+                    const int64_t group_end,
+                    ObIArray<ObAiColumnInfo> &matched,
+                    ObIArray<ObString> &results);
+  int drop_table_tasks(const uint64_t table_id);
+  int defer_or_drop_group(const share::schema::ObTableSchema &table,
+                          const ObIArray<AiColumnTask> &tasks,
+                          const int64_t group_begin,
+                          const int64_t group_end,
+                          ObIArray<ObAiColumnInfo> &matched);
   volatile int64_t started_;
 };
 
@@ -1067,6 +1062,20 @@ int ObAiColumnWorker::process_one_group()
   return ret;
 }
 
+int ObAiColumnWorker::drop_table_tasks(const uint64_t table_id)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString sql;
+  int64_t affected = 0;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu", AI_TASK_TNAME,
+                                    table_id))) {
+  } else if (OB_FAIL(GCTX.sql_proxy_->write(sql.ptr(), affected))) {
+  }
+  return ret;
+}
+
 int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
                                     const ObIArray<AiColumnTask> &tasks,
                                     const int64_t group_begin,
@@ -1087,13 +1096,7 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
   } else if (OB_FAIL(guard.get_table_schema(first.table_id_, table_schema)) || OB_ISNULL(table_schema)) {
     // the table is gone: drop the orphan tasks
     ret = OB_SUCCESS;
-    ObSqlString sql;
-    int64_t affected = 0;
-    if (OB_ISNULL(GCTX.sql_proxy_)) {
-      ret = OB_NOT_INIT;
-    } else if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu", AI_TASK_TNAME,
-                                      first.table_id_))) {
-    } else if (OB_FAIL(GCTX.sql_proxy_->write(sql.ptr(), affected))) {
+    if (OB_FAIL(drop_table_tasks(first.table_id_))) {
     }
   } else if (OB_FAIL(guard.get_database_schema(table_schema->get_database_id(), db_schema))
              || OB_ISNULL(db_schema)) {
@@ -1101,8 +1104,8 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
   } else {
     for (int64_t i = group_begin; OB_SUCC(ret) && all_ok && i < group_end; ++i) {
       const AiColumnTask &task = tasks.at(i);
-      bool found = false;
       ObAiColumnInfo info;
+      bool found = false;
       for (int64_t c = 0; !found && c < ai_columns.count(); ++c) {
         if (ai_columns.at(c).column_id_ == task.column_id_) {
           info = ai_columns.at(c);
@@ -1110,9 +1113,10 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
         }
       }
       ObString result;
-      if (!found) {
+      if (OB_FAIL(matched.push_back(info))) {
+      } else if (!found) {
+        // the AI column was dropped: the task is dropped below
         all_ok = false;
-      } else if (OB_FAIL(matched.push_back(info))) {
       } else if (OB_FAIL(evaluate_task(allocator, *table_schema, *db_schema, task, info, result))) {
         all_ok = false;
         ret = OB_SUCCESS;
@@ -1121,12 +1125,11 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
     }
     if (OB_FAIL(ret)) {
     } else if (all_ok) {
-      if (OB_FAIL(commit_group(*table_schema, *db_schema, tasks, group_begin, group_end,
-                               matched, results))) {
+      if (OB_FAIL(publish_group(*table_schema, *db_schema, tasks, group_begin, group_end,
+                                matched, results))) {
       }
-    } else if (!matched.empty()) {
-      if (OB_FAIL(handle_group_failure(*table_schema, *db_schema, tasks, group_begin, group_end,
-                                       matched))) {
+    } else {
+      if (OB_FAIL(defer_or_drop_group(*table_schema, tasks, group_begin, group_end, matched))) {
       }
     }
   }
@@ -1205,69 +1208,57 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
   return ret;
 }
 
-int ObAiColumnWorker::commit_group(const ObTableSchema &table,
-                                   const ObDatabaseSchema &db,
-                                   const ObIArray<AiColumnTask> &tasks,
-                                   const int64_t group_begin,
-                                   const int64_t group_end,
-                                   ObIArray<ObAiColumnInfo> &matched,
-                                   ObIArray<ObString> &results)
+int ObAiColumnWorker::publish_group(const ObTableSchema &table,
+                                    const ObDatabaseSchema &db,
+                                    const ObIArray<AiColumnTask> &tasks,
+                                    const int64_t group_begin,
+                                    const int64_t group_end,
+                                    ObIArray<ObAiColumnInfo> &matched,
+                                    ObIArray<ObString> &results)
 {
   int ret = OB_SUCCESS;
   ObMySQLTransaction trans;
   ObSqlString sql;
   int64_t affected = 0;
+  const AiColumnTask &first = tasks.at(group_begin);
   ObString table_name = table.get_table_name_str();
   ObString db_name = db.get_database_name_str();
   if (OB_ISNULL(GCTX.sql_proxy_)) {
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(trans.start(GCTX.sql_proxy_))) {
   } else {
-    // one UPDATE publishes the whole row of AI columns at once, so a reader can
-    // never observe only part of a group
-    if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET ", db_name.length(), db_name.ptr(),
-                               table_name.length(), table_name.ptr()))) {
-    }
-    for (int64_t i = group_begin; OB_SUCC(ret) && i < group_end; ++i) {
-      const ObAiColumnInfo &info = matched.at(i - group_begin);
-      const ObColumnSchemaV2 *result_col = table.get_column_schema(info.column_id_);
-      const ObColumnSchemaV2 *state_col = table.get_column_schema(info.state_column_id_);
-      if (OB_ISNULL(result_col) || OB_ISNULL(state_col)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (i > group_begin && OB_FAIL(sql.append(", "))) {
-      } else if (OB_FAIL(ai_append_identifier(sql, result_col->get_column_name_str()))
-                 || OB_FAIL(sql.append(" = "))
-                 || OB_FAIL(sql.append(results.at(i - group_begin)))
-                 || OB_FAIL(sql.append(", "))
-                 || OB_FAIL(ai_append_identifier(sql, state_col->get_column_name_str()))
-                 || OB_FAIL(sql.append_fmt(" = %ld", AI_STATE_READY))) {
-      }
-    }
-    if (OB_SUCC(ret)) {
-      const ObColumnSchemaV2 *req_col =
-          table.get_column_schema(matched.at(0).request_column_id_);
-      if (OB_ISNULL(req_col)) {
-        ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(sql.append(" WHERE "))
-                 || OB_FAIL(sql.append(tasks.at(group_begin).rowkey_predicate_))
-                 || OB_FAIL(sql.append(" AND "))
-                 || OB_FAIL(ai_append_identifier(sql, req_col->get_column_name_str()))
-                 || OB_FAIL(sql.append(" = "))
-                 || OB_FAIL(ai_append_sql_string(sql, tasks.at(group_begin).request_id_))) {
-      }
-    }
-    if (OB_SUCC(ret) && OB_FAIL(trans.write(sql.ptr(), affected))) {
-    }
-    // only drop the tasks when our write actually landed (the request may have
-    // been superseded while the model was computing)
-    if (OB_SUCC(ret) && affected > 0) {
+    // Claim the group.  Only the worker whose request id is still stored in the
+    // task rows may publish, so a result of a superseded request cannot win.
+    if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu AND rowkey_predicate = ",
+                               AI_TASK_TNAME, first.table_id_))
+        || OB_FAIL(ai_append_sql_string(sql, first.rowkey_predicate_))
+        || OB_FAIL(sql.append(" AND request_id = "))
+        || OB_FAIL(ai_append_sql_string(sql, first.request_id_))) {
+    } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
+    } else if (affected > 0) {
       sql.reuse();
-      if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu AND rowkey_predicate = ",
-                                 AI_TASK_TNAME, tasks.at(group_begin).table_id_))
-          || OB_FAIL(ai_append_sql_string(sql, tasks.at(group_begin).rowkey_predicate_))
-          || OB_FAIL(sql.append(" AND request_id = "))
-          || OB_FAIL(ai_append_sql_string(sql, tasks.at(group_begin).request_id_))) {
-      } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
+      if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET ", db_name.length(), db_name.ptr(),
+                                 table_name.length(), table_name.ptr()))) {
+      }
+    }
+    if (OB_SUCC(ret) && affected > 0) {
+      // one UPDATE publishes the whole row of AI columns at once, so a reader
+      // never observes only part of a group
+      for (int64_t i = group_begin; OB_SUCC(ret) && i < group_end; ++i) {
+        const ObAiColumnInfo &info = matched.at(i - group_begin);
+        const ObColumnSchemaV2 *result_col = table.get_column_schema(info.column_id_);
+        if (OB_ISNULL(result_col)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else if (i > group_begin && OB_FAIL(sql.append(", "))) {
+        } else if (OB_FAIL(ai_append_identifier(sql, result_col->get_column_name_str()))
+                   || OB_FAIL(sql.append(" = "))
+                   || OB_FAIL(sql.append(results.at(i - group_begin)))) {
+        }
+      }
+      if (OB_SUCC(ret)) {
+        if (OB_FAIL(sql.append(" WHERE ")) || OB_FAIL(sql.append(first.rowkey_predicate_))) {
+        } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
+        }
       }
     }
     int end_ret = trans.end(OB_SUCC(ret));
@@ -1278,16 +1269,14 @@ int ObAiColumnWorker::commit_group(const ObTableSchema &table,
   return ret;
 }
 
-int ObAiColumnWorker::handle_group_failure(const ObTableSchema &table,
-                                           const ObDatabaseSchema &db,
-                                           const ObIArray<AiColumnTask> &tasks,
-                                           const int64_t group_begin,
-                                           const int64_t group_end,
-                                           ObIArray<ObAiColumnInfo> &matched)
+int ObAiColumnWorker::defer_or_drop_group(const ObTableSchema &table,
+                                          const ObIArray<AiColumnTask> &tasks,
+                                          const int64_t group_begin,
+                                          const int64_t group_end,
+                                          ObIArray<ObAiColumnInfo> &matched)
 {
   int ret = OB_SUCCESS;
-  ObString table_name = table.get_table_name_str();
-  ObString db_name = db.get_database_name_str();
+  UNUSED(table);
   for (int64_t i = group_begin; OB_SUCC(ret) && i < group_end; ++i) {
     const AiColumnTask &task = tasks.at(i);
     const ObAiColumnInfo &info = matched.at(i - group_begin);
@@ -1309,32 +1298,15 @@ int ObAiColumnWorker::handle_group_failure(const ObTableSchema &table,
       } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
       }
       if (OB_SUCC(ret) && affected > 0 && task.retry_count_ + 1 > info.max_retries_) {
-        // the retry budget of this AI COLUMN is exhausted: drop the task and
-        // leave the row marked FAILED so a strict read keeps rejecting it
-        const ObColumnSchemaV2 *state_col = table.get_column_schema(info.state_column_id_);
-        const ObColumnSchemaV2 *req_col = table.get_column_schema(info.request_column_id_);
+        // the retry budget of this AI COLUMN is exhausted: the task is dropped
+        // and the AI COLUMN stays NULL ("failed")
         sql.reuse();
-        if (OB_ISNULL(state_col) || OB_ISNULL(req_col)) {
-          ret = OB_ERR_UNEXPECTED;
-        } else if (OB_FAIL(sql.append_fmt(
+        if (OB_FAIL(sql.append_fmt(
                      "DELETE FROM %s WHERE table_id = %lu AND column_id = %lu "
                      "AND rowkey_predicate = ", AI_TASK_TNAME, task.table_id_,
                      task.column_id_))
                    || OB_FAIL(ai_append_sql_string(sql, task.rowkey_predicate_))
                    || OB_FAIL(sql.append(" AND request_id = "))
-                   || OB_FAIL(ai_append_sql_string(sql, task.request_id_))) {
-        } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
-        }
-        sql.reuse();
-        if (OB_FAIL(ret)) {
-        } else if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET ", db_name.length(),
-                                          db_name.ptr(), table_name.length(), table_name.ptr()))
-                   || OB_FAIL(ai_append_identifier(sql, state_col->get_column_name_str()))
-                   || OB_FAIL(sql.append_fmt(" = %ld WHERE ", AI_STATE_FAILED))
-                   || OB_FAIL(sql.append(task.rowkey_predicate_))
-                   || OB_FAIL(sql.append(" AND "))
-                   || OB_FAIL(ai_append_identifier(sql, req_col->get_column_name_str()))
-                   || OB_FAIL(sql.append(" = "))
                    || OB_FAIL(ai_append_sql_string(sql, task.request_id_))) {
         } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
         }
@@ -1349,8 +1321,8 @@ int ObAiColumnWorker::handle_group_failure(const ObTableSchema &table,
 }
 
 // --------------------------------------------------------------------------
-// DML reconciliation: turn every PENDING row of the modified table into a task.
-// Runs in the same transaction as the DML statement.
+// DML reconciliation: turn every clear AI COLUMN of the modified table into a
+// task.  Runs in the same transaction as the DML statement.
 // --------------------------------------------------------------------------
 // The reconciliation itself runs DML on the very table it reconciles, so the
 // nested statement must not reconcile again (guarded per thread because the
@@ -1414,10 +1386,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
       ObString table_name = table_schema->get_table_name_str();
       ObSEArray<ObColDesc, 4> rowkey_cols;
       const ObColumnSchemaV2 *pk_col = NULL;
-      LOG_INFO("[AI_COL_DBG] reconcile begin", K(table_loc_id), K(ai_columns.count()),
-               K(rowkey_prefix.string()));
       int tmp_ret = op.begin_nested_session(true /*skip_cur_stmt_tables*/);
-      LOG_INFO("[AI_COL_DBG] nested session", KR(tmp_ret));
       if (OB_SUCCESS != tmp_ret) {
         ret = tmp_ret;
       } else if (OB_FAIL(table_schema->get_rowkey_column_ids(rowkey_cols))
@@ -1428,26 +1397,20 @@ int reconcile_ai_columns(ObTableModifyOp &op)
         for (int64_t i = 0; OB_SUCC(ret) && i < ai_columns.count(); ++i) {
           ObSqlString sql;
           const ObAiColumnInfo &info = ai_columns.at(i);
-          const ObColumnSchemaV2 *state_col =
-              table_schema->get_column_schema(info.state_column_id_);
-          const ObColumnSchemaV2 *request_col =
-              table_schema->get_column_schema(info.request_column_id_);
-          if (OB_ISNULL(state_col) || OB_ISNULL(request_col)) {
-            ret = OB_ERR_UNEXPECTED;
-          } else if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET ", db_name.length(),
-                                            db_name.ptr(), table_name.length(), table_name.ptr()))
-                     || OB_FAIL(ai_append_identifier(sql, request_col->get_column_name_str()))
-                     || OB_FAIL(sql.append(" = "))
-                     || OB_FAIL(ai_append_sql_string(sql, request_id))
-                     || OB_FAIL(sql.append(" WHERE "))
-                     || OB_FAIL(ai_append_identifier(sql, state_col->get_column_name_str()))
-                     || OB_FAIL(sql.append_fmt(" IS NULL OR `%.*s` = %ld",
-                                               state_col->get_column_name_str().length(),
-                                               state_col->get_column_name_str().ptr(),
-                                               AI_STATE_PENDING))) {
+          // 1) drop the tasks of rows that disappeared (DELETE and key UPDATE)
+          if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu AND column_id = %lu "
+                                     "AND rowkey_predicate NOT IN (SELECT CONCAT(",
+                                     AI_TASK_TNAME, table_schema->get_table_id(),
+                                     info.column_id_))
+                     || OB_FAIL(ai_append_sql_string(sql, rowkey_prefix.string()))
+                     || OB_FAIL(sql.append_fmt(", `%.*s`) FROM `%.*s`.`%.*s`)",
+                                               pk_col->get_column_name_str().length(),
+                                               pk_col->get_column_name_str().ptr(),
+                                               db_name.length(), db_name.ptr(),
+                                               table_name.length(), table_name.ptr()))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
-          LOG_INFO("[AI_COL_DBG] mark write", KR(ret), K(ret), K(i));
+          // 2) create (or refresh) the task of every clear AI COLUMN
           sql.reuse();
           if (OB_FAIL(ret)) {
           } else if (OB_FAIL(sql.append_fmt("REPLACE INTO %s "
@@ -1455,22 +1418,20 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                             "eligible_ts, state, retry_count) "
                                             "SELECT %lu, %lu, ", AI_TASK_TNAME,
                                             table_schema->get_table_id(), info.column_id_))
-                     || OB_FAIL(ai_append_identifier(sql, request_col->get_column_name_str()))
+                     || OB_FAIL(ai_append_sql_string(sql, request_id))
                      || OB_FAIL(sql.append(", CONCAT("))
                      || OB_FAIL(ai_append_sql_string(sql, rowkey_prefix.string()))
-                     || OB_FAIL(sql.append_fmt(", `%.*s`), now(6), %ld, 0 FROM `%.*s`.`%.*s` WHERE ",
-                               pk_col->get_column_name_str().length(),
-                               pk_col->get_column_name_str().ptr(), AI_TASK_PENDING,
-                               db_name.length(), db_name.ptr(), table_name.length(),
-                               table_name.ptr()))
-                     || OB_FAIL(ai_append_identifier(sql, state_col->get_column_name_str()))
-                     || OB_FAIL(sql.append_fmt(" IS NULL OR `%.*s` = %ld",
-                                               state_col->get_column_name_str().length(),
-                                               state_col->get_column_name_str().ptr(),
-                                               AI_STATE_PENDING))) {
+                     || OB_FAIL(sql.append_fmt(", `%.*s`), now(6), %ld, 0 FROM `%.*s`.`%.*s` "
+                                               "WHERE `%.*s` IS NULL",
+                                               pk_col->get_column_name_str().length(),
+                                               pk_col->get_column_name_str().ptr(),
+                                               AI_TASK_PENDING,
+                                               db_name.length(), db_name.ptr(),
+                                               table_name.length(), table_name.ptr(),
+                                               info.column_name_.length(),
+                                               info.column_name_.ptr()))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
-          LOG_INFO("[AI_COL_DBG] insert write", KR(ret), K(ret), K(i));
         }
       }
       int end_ret = op.end_nested_session();
@@ -1481,7 +1442,6 @@ int reconcile_ai_columns(ObTableModifyOp &op)
       if (OB_SUCCESS != close_ret && OB_SUCCESS == ret) {
         ret = close_ret;
       }
-      LOG_INFO("[AI_COL_DBG] reconcile end", KR(ret), K(ret));
     }
     if (OB_SUCC(ret) && !ai_columns.empty()) {
       ObAiColumnWorker::instance().ensure_started();
