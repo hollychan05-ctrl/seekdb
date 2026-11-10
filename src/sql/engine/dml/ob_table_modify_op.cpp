@@ -1047,6 +1047,7 @@ int ObAiColumnWorker::process_one_group()
   } else if (tasks.empty()) {
     // nothing to do
   } else {
+    LOG_INFO("[AI_COL_W] loaded", "count", tasks.count());
     // group the tasks that belong to the same row and the same request
     const AiColumnTask &first = tasks.at(0);
     int64_t group_end = 1;
@@ -1127,6 +1128,8 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
       } else if (OB_FAIL(results.push_back(result))) {
       }
     }
+    LOG_INFO("[AI_COL_W] group", KR(ret), K(all_ok), K(matched.count()),
+             K(results.count()), K(group_begin), K(group_end));
     if (OB_FAIL(ret)) {
     } else if (all_ok) {
       if (OB_FAIL(publish_group(*table_schema, *db_schema, tasks, group_begin, group_end,
@@ -1136,6 +1139,7 @@ int ObAiColumnWorker::process_group(ObArenaAllocator &allocator,
       if (OB_FAIL(defer_or_drop_group(*table_schema, tasks, group_begin, group_end, matched))) {
       }
     }
+    LOG_INFO("[AI_COL_W] group done", KR(ret));
   }
   return ret;
 }
@@ -1207,6 +1211,8 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
         } else if (OB_FAIL(ob_write_string(allocator, value.string(), result))) {
         }
       }
+      LOG_INFO("[AI_COL_W] model", KR(ret), K(info.model_), K(prompt_text),
+               K(model_result), K(info.system_));
     }
   }
   return ret;
@@ -1266,6 +1272,7 @@ int ObAiColumnWorker::publish_group(const ObTableSchema &table,
         }
       }
     }
+    LOG_INFO("[AI_COL_W] publish", KR(ret), K(affected));
     int end_ret = trans.end(OB_SUCC(ret));
     if (OB_SUCCESS != end_ret && OB_SUCCESS == ret) {
       ret = end_ret;
