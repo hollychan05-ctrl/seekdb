@@ -1171,14 +1171,18 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
       ObMySQLResult *result_set = NULL;
       ObString raw;
+      int next_ret = OB_SUCCESS;
+      int get_ret = OB_SUCCESS;
       if (OB_FAIL(GCTX.sql_proxy_->read(res, sql.ptr()))) {
       } else if (OB_ISNULL(result_set = res.get_result())) {
         ret = OB_ERR_UNEXPECTED;
-      } else if (OB_FAIL(result_set->next())) {
+      } else if (OB_FAIL(next_ret = result_set->next())) {
         // the row disappeared, nothing to compute
-      } else if (OB_FAIL(result_set->get_varchar(static_cast<int64_t>(0), raw))) {
+      } else if (OB_FAIL(get_ret = result_set->get_varchar(static_cast<int64_t>(0), raw))) {
       } else if (OB_FAIL(ob_write_string(allocator, raw, prompt_text))) {
       }
+      LOG_INFO("[AI_COL_W] prompt", KR(ret), K(next_ret), K(get_ret), K(sql.string()),
+               K(raw));
     }
   }
   // 2. ask the model
