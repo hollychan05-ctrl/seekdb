@@ -14889,11 +14889,21 @@ DROP CONSTRAINT constraint_name
 | RETRY AI COLUMN column_name opt_where
 {
   ParseNode *retry_node = NULL;
-  malloc_non_terminal_node(retry_node, result->malloc_pool_, T_AI_COLUMN_RETRY, 3, $4, $5, NULL);
+  ParseNode *pred_node = NULL;
   if (NULL != $5) {
-    check_ret(setup_token_pos_info_and_dup_string(retry_node->children_[2], result,
-                                                  @5.first_column, @5.last_column), &@1, result);
+    /* carry the raw text of the WHERE clause: the retry is executed as an UPDATE
+       built from it, and the pseudo STATUS column cannot be recovered from the
+       parse tree alone */
+    malloc_terminal_node(pred_node, result->malloc_pool_, T_VARCHAR);
+    if (OB_LIKELY(NULL != pred_node)) {
+      pred_node->str_len_ = @5.last_column - @5.first_column + 1;
+      pred_node->str_value_ = copy_expr_string(result, @5.first_column, @5.last_column);
+      if (NULL == pred_node->str_value_) {
+        pred_node->str_len_ = 0;
+      }
+    }
   }
+  malloc_non_terminal_node(retry_node, result->malloc_pool_, T_AI_COLUMN_RETRY, 3, $4, $5, pred_node);
   $$ = retry_node;
 }
 ;
