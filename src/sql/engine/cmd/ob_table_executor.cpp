@@ -42,6 +42,8 @@
 
 #include "sql/printer/ob_select_stmt_printer.h"
 #include "share/ob_structured_event_logger.h"
+#include "share/ob_dml_sql_splicer.h"
+#include "share/inner_table/ob_inner_table_schema_constants.h"
 namespace oceanbase
 {
 using namespace common;
@@ -50,6 +52,190 @@ using namespace share::schema;
 using namespace observer;
 namespace sql
 {
+
+namespace
+{
+// the metadata lives in the system tenant, the write happens from a user session
+static const char *const OB_ALL_AI_COLUMN_QUALIFIED_TNAME = "oceanbase.__all_ai_column";
+
+// The state machine of every AI COLUMN is carried by three hidden columns that
+// are named after the AI column (see AiColumnHiddenColumn).  The normalized
+// description of the AI expression is stored in the comment of the hidden
+// result spec column, so the metadata row of __all_ai_column can be rebuilt
+// from the table schema alone.
+int collect_ai_column_hidden_info(const ObTableSchema &table_schema,
+                                  const ObColumnSchemaV2 &ai_column,
+                                  uint64_t &state_column_id,
+                                  uint64_t &request_column_id,
+                                  uint64_t &result_spec_column_id,
+                                  ObString &result_spec)
+{
+  int ret = OB_SUCCESS;
+  state_column_id = OB_INVALID_ID;
+  request_column_id = OB_INVALID_ID;
+  result_spec_column_id = OB_INVALID_ID;
+  result_spec.reset();
+  const ObString &ai_name = ai_column.get_column_name_str();
+  for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
+       OB_SUCC(ret) && iter != table_schema.column_end(); ++iter) {
+    const ObColumnSchemaV2 *column = *iter;
+    if (OB_ISNULL(column) || !column->is_hidden()) {
+      // not a hidden column
+    } else if (AiColumnHiddenColumn::is_hidden_column_of(
+                 column->get_column_name_str(), ai_name, AiColumnHiddenColumn::STATE_SUFFIX)) {
+      state_column_id = column->get_column_id();
+    } else if (AiColumnHiddenColumn::is_hidden_column_of(
+                 column->get_column_name_str(), ai_name, AiColumnHiddenColumn::REQUEST_SUFFIX)) {
+      request_column_id = column->get_column_id();
+    } else if (AiColumnHiddenColumn::is_hidden_column_of(
+                 column->get_column_name_str(), ai_name, AiColumnHiddenColumn::RESULT_SPEC_SUFFIX)) {
+      result_spec_column_id = column->get_column_id();
+      result_spec = column->get_comment_str();
+    }
+  }
+  if (OB_SUCC(ret)
+      && (OB_INVALID_ID == state_column_id
+          || OB_INVALID_ID == request_column_id
+          || OB_INVALID_ID == result_spec_column_id
+          || result_spec.empty())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("ai column hidden columns are incomplete", KR(ret), K(ai_name));
+  }
+  return ret;
+}
+
+// read `"key":"string value"` or `"key":123` out of the normalized AI spec
+int read_ai_spec_field(const ObString &spec, const char *key, ObString &value, bool &is_string)
+{
+  int ret = OB_SUCCESS;
+  value.reset();
+  is_string = false;
+  char pattern[64];
+  int64_t pattern_len = 0;
+  if (OB_ISNULL(key)) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(databuff_printf(pattern, sizeof(pattern), pattern_len, "\"%s\":", key))) {
+  } else {
+    const char *found = NULL;
+    const int64_t spec_len = spec.length();
+    for (int64_t i = 0; NULL == found && i + pattern_len <= spec_len; ++i) {
+      if (0 == MEMCMP(spec.ptr() + i, pattern, pattern_len)) {
+        found = spec.ptr() + i + pattern_len;
+      }
+    }
+    if (NULL == found) {
+      ret = OB_ENTRY_NOT_EXIST;
+    } else {
+      const char *spec_end = spec.ptr() + spec_len;
+      if (found < spec_end && '"' == *found) {
+        is_string = true;
+        const char *start = found + 1;
+        const char *cur = start;
+        while (cur < spec_end && '"' != *cur) {
+          if ('\\' == *cur && cur + 1 < spec_end) {
+            ++cur;
+          }
+          ++cur;
+        }
+        value.assign_ptr(start, static_cast<int32_t>(cur - start));
+      } else {
+        const char *cur = found;
+        while (cur < spec_end && ',' != *cur && '}' != *cur) {
+          ++cur;
+        }
+        value.assign_ptr(found, static_cast<int32_t>(cur - found));
+      }
+    }
+  }
+  return ret;
+}
+
+int64_t parse_ai_spec_int(const ObString &value)
+{
+  int64_t result = 0;
+  for (int64_t i = 0; i < value.length(); ++i) {
+    const char c = value.ptr()[i];
+    if (c >= '0' && c <= '9') {
+      result = result * 10 + (c - '0');
+    }
+  }
+  return result;
+}
+
+// Persist one __all_ai_column row per AI column of %table_schema.
+int write_ai_column_metadata(ObExecContext &ctx,
+                             const uint64_t table_id,
+                             const ObTableSchema &table_schema)
+{
+  int ret = OB_SUCCESS;
+  ObSQLSessionInfo *session = ctx.get_my_session();
+  sqlclient::ObISQLConnection *conn = NULL;
+  sqlclient::ObISQLConnectionGuard conn_guard;
+  if (OB_INVALID_ID == table_id) {
+    // the table was not created (e.g. IF NOT EXISTS hit), nothing to persist
+  } else if (OB_ISNULL(session)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(query::ObInnerSQLConnectionAccess::create_spi_connection_with_external_session(
+                       session, conn_guard))) {
+  } else if (OB_ISNULL(conn = conn_guard.get_ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  for (ObTableSchema::const_column_iterator iter = table_schema.column_begin();
+       OB_SUCC(ret) && iter != table_schema.column_end(); ++iter) {
+    const ObColumnSchemaV2 *ai_column = *iter;
+    if (OB_ISNULL(ai_column) || !ai_column->is_ai_column()) {
+      // not an AI column
+    } else {
+      uint64_t state_column_id = OB_INVALID_ID;
+      uint64_t request_column_id = OB_INVALID_ID;
+      uint64_t result_spec_column_id = OB_INVALID_ID;
+      ObString result_spec;
+      ObString model_name;
+      ObString sync_mode;
+      ObString max_retries_str;
+      ObString func_type_str;
+      bool is_string = false;
+      if (OB_FAIL(collect_ai_column_hidden_info(table_schema, *ai_column,
+                                                state_column_id, request_column_id,
+                                                result_spec_column_id, result_spec))) {
+      } else if (OB_FAIL(read_ai_spec_field(result_spec, "model", model_name, is_string))) {
+      } else if (OB_FAIL(read_ai_spec_field(result_spec, "sync_mode", sync_mode, is_string))) {
+      } else if (OB_FAIL(read_ai_spec_field(result_spec, "max_retries", max_retries_str, is_string))) {
+      } else if (OB_FAIL(read_ai_spec_field(result_spec, "func_type", func_type_str, is_string))) {
+      } else {
+        ObDMLSqlSplicer dml;
+        ObSqlString insert_sql;
+        int64_t affected_rows = 0;
+        const int64_t max_retries = parse_ai_spec_int(max_retries_str);
+        const int64_t func_type = parse_ai_spec_int(func_type_str);
+        if (OB_FAIL(dml.add_pk_column("table_id", ObSchemaUtils::get_extract_schema_id(table_id)))
+            || OB_FAIL(dml.add_pk_column("column_id", ai_column->get_column_id()))
+            || OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(ai_column->get_column_name_str())))
+            || OB_FAIL(dml.add_column("state_column_id", state_column_id))
+            || OB_FAIL(dml.add_column("request_column_id", request_column_id))
+            || OB_FAIL(dml.add_column("result_spec_column_id", result_spec_column_id))
+            || OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(result_spec)))
+            || OB_FAIL(dml.add_column("max_retries", max_retries))
+            || OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(sync_mode)))
+            || OB_FAIL(dml.add_column("model_name", ObHexEscapeSqlStr(model_name)))
+            || OB_FAIL(dml.add_column("func_type", func_type))
+            || OB_FAIL(dml.add_gmt_create())
+            || OB_FAIL(dml.add_gmt_modified())
+            || OB_FAIL(dml.splice_insert_sql(OB_ALL_AI_COLUMN_QUALIFIED_TNAME, insert_sql))
+            || OB_FAIL(conn->execute_write(insert_sql.ptr(), affected_rows))) {
+        } else if (affected_rows != 1) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("unexpected affected rows for __all_ai_column", KR(ret), K(affected_rows));
+        }
+      }
+    }
+    if (OB_FAIL(ret)) {
+      LOG_ERROR("failed to write __all_ai_column metadata", KR(ret));
+    }
+  }
+  return ret;
+}
+} // anonymous namespace
 
 ObCreateTableExecutor::ObCreateTableExecutor()
 {
@@ -492,6 +678,11 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
       if (OB_FAIL(execute_ctas(ctx, stmt))){
       }
     }
+    if (OB_SUCC(ret) && OB_INVALID_ID != res.table_id_ && !res.do_nothing_) {
+      // persist the metadata of the AI COLUMNs declared by this table
+      if (OB_FAIL(write_ai_column_metadata(ctx, res.table_id_, table_schema))) {
+      }
+    }
     SERVER_EVENT_ADD("ddl", "create table execute finish",
       "ret", ret,
       "trace_id", *ObCurTraceId::get_trace_id(),
@@ -829,6 +1020,14 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
                                                 ctx.local_command_service()))) {
           }
         }
+      }
+    }
+    if (OB_SUCC(ret) && alter_table_arg.alter_table_schema_.get_column_count() > 0) {
+      // newly added AI COLUMNs need their __all_ai_column metadata
+      const uint64_t ai_table_id = OB_INVALID_ID != alter_table_arg.table_id_
+                                   ? alter_table_arg.table_id_
+                                   : alter_table_arg.alter_table_schema_.get_table_id();
+      if (OB_FAIL(write_ai_column_metadata(ctx, ai_table_id, alter_table_arg.alter_table_schema_))) {
       }
     }
     if (OB_SUCC(ret)) {

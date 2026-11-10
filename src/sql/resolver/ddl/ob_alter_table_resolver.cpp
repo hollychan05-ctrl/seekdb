@@ -3459,6 +3459,20 @@ int ObAlterTableResolver::resolve_add_column(const ParseNode &node, ObColumnName
           } else if (FALSE_IT(alter_table_stmt->set_sql_mode(session_info_->get_sql_mode()))) {
           }
         }
+
+        // an AI COLUMN carries three hidden columns that follow it
+        for (int64_t hidden_idx = 0;
+             OB_SUCC(ret) && alter_column_schema.is_ai_column()
+             && hidden_idx < pending_ai_hidden_columns_.count();
+             ++hidden_idx) {
+          AlterColumnSchema hidden_col;
+          if (OB_FAIL(hidden_col.assign(pending_ai_hidden_columns_.at(hidden_idx)))) {
+          } else {
+            hidden_col.alter_type_ = OB_DDL_ADD_COLUMN;
+            if (OB_FAIL(alter_table_stmt->add_column(hidden_col))) {
+            }
+          }
+        }
       }
     }
     add_column_cnt_++;

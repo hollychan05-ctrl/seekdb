@@ -536,6 +536,9 @@ protected:
                                       bool &is_modify_column,
                                       bool &is_modify_column_visibility,
                                       const bool allow_has_default = true);
+  int resolve_ai_column_attribute(share::schema::ObColumnSchemaV2 &column,
+                                  ParseNode *attr_node,
+                                  ObColumnResolveStat &resolve_stat);
   int resolve_normal_column_attribute_check_cons(ObColumnSchemaV2 &column,
                                                  ParseNode *attrs_node,
                                                  ObCreateTableStmt *create_table_stmt);
@@ -881,6 +884,10 @@ protected:
   common::ObString vec_column_name_;
   ObIndexType vec_index_type_;
   ObSemiStructEncodingType semistruct_encoding_type_;
+  // Hidden columns produced while resolving the last AI COLUMN attribute. They
+  // are materialized by the concrete resolver right after the AI column itself
+  // has been appended to the schema.
+  common::ObSEArray<share::schema::ObColumnSchemaV2, 3> pending_ai_hidden_columns_;
 private:
   template <typename STMT>
   DISALLOW_COPY_AND_ASSIGN(ObDDLResolver);

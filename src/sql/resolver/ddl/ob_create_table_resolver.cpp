@@ -834,6 +834,20 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             }
           }
 
+          // an AI COLUMN carries three hidden columns. They are collected here
+          // and appended after every user column (by the hidden column loop
+          // below) so that the column id order always matches the storage
+          // order inside __all_column.
+          for (int64_t hidden_idx = 0;
+               OB_SUCC(ret) && column.is_ai_column() && hidden_idx < pending_ai_hidden_columns_.count();
+               ++hidden_idx) {
+            ObColumnSchemaV2 hidden_col;
+            if (OB_FAIL(hidden_col.assign(pending_ai_hidden_columns_.at(hidden_idx)))) {
+            } else if (FALSE_IT(hidden_col.set_column_id(gen_column_id()))) {
+            } else if (OB_FAIL(resolved_cols.push_back(hidden_col))) {
+            }
+          }
+
           if (OB_SUCC(ret) && !column.is_invisible_column()) {
             has_visible_col = true;
           }

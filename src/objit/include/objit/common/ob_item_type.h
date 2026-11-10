@@ -1577,9 +1577,11 @@ typedef enum ObItemType
   T_RESERVED_3995 = 3995,
   T_RESERVED_3996 = 3996,
   T_RESERVED_3997 = 3997,
-  T_RESERVED_3998 = 3998,
+  // AI COLUMN ( <ai_func_expr> ) [WITH (...)]: an asynchronous AI generated column
+  T_AI_COLUMN_ATTR = 3998,
   T_RESERVED_3999 = 3999,
-  T_RESERVED_4000 = 4000,
+  // one `name = value` entry of an AI COLUMN WITH(...) clause
+  T_AI_COLUMN_OPTION = 4000,
   T_RESERVED_4001 = 4001,
   T_RESERVED_4002 = 4002,
   T_RESERVED_4003 = 4003,

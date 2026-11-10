@@ -2469,6 +2469,68 @@ def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
 
 
+# Metadata of the AI COLUMN definitions. One row per AI column.
+# - column_id points to the user visible result column.
+# - state_column_id/request_column_id/result_spec_column_id point to the three
+#   hidden columns that carry the per row state machine of the AI column.
+# - normalized_expr keeps the normalized description of the AI expression
+#   (function, model, prompt expr and the result type instruction).
+all_ai_column_def = dict(
+    owner = 'holly',
+    table_name = '__all_ai_column',
+    table_id = '1135',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('table_id', 'int'),
+      ('column_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('column_name', 'varchar:128', 'false'),
+        ('state_column_id', 'int', 'false'),
+        ('request_column_id', 'int', 'false'),
+        ('result_spec_column_id', 'int', 'false'),
+        ('normalized_expr', 'varchar:4096', 'true'),
+        ('max_retries', 'int', 'false'),
+        ('sync_mode', 'varchar:32', 'true'),
+        ('model_name', 'varchar:128', 'true'),
+        ('func_type', 'int', 'false')
+  ]
+)
+def_table_schema(**all_ai_column_def)
+
+
+# Pending/in-flight AI COLUMN computation tasks. A task row shares the same
+# request_id as its sibling tasks so a whole row of AI columns is applied
+# atomically by the worker.
+all_ai_column_task_def = dict(
+    owner = 'holly',
+    table_name = '__all_ai_column_task',
+    table_id = '1136',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+      ('task_id', 'int')
+    ],
+
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('table_id', 'int', 'false'),
+        ('column_id', 'int', 'false'),
+        ('request_id', 'varchar:64', 'true'),
+        ('rowkey_predicate', 'varchar:1024', 'true'),
+        ('eligible_ts', 'timestamp:6', 'true'),
+        ('state', 'int', 'false'),
+        ('retry_count', 'int', 'false')
+  ]
+)
+def_table_schema(**all_ai_column_task_def)
+
+
 # Reserved position (placeholder before this line)
 # Placeholder suggestion for this section: Use actual table names for placeholders
 ################################################################################

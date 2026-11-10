@@ -32,6 +32,58 @@ namespace share
 namespace schema
 {
 
+// Every AI COLUMN is backed by three hidden columns:
+//   state       : the per row state of the AI column (READY/PENDING/...)
+//   request     : the id of the in flight request that refreshes the value
+//   result_spec : the normalized description of how the value is produced
+// They are named after the AI column itself so that both the DDL layer and the
+// runtime can rebuild the mapping from the table schema alone.
+class AiColumnHiddenColumn final
+{
+public:
+  static constexpr const char *STATE_SUFFIX = "_ai_state";
+  static constexpr const char *REQUEST_SUFFIX = "_ai_request";
+  static constexpr const char *RESULT_SPEC_SUFFIX = "_ai_result_spec";
+
+  static int build_name(const common::ObString &ai_column_name,
+                        const char *suffix,
+                        common::ObIAllocator &allocator,
+                        common::ObString &name)
+  {
+    int ret = common::OB_SUCCESS;
+    char buf[common::OB_MAX_COLUMN_NAME_LENGTH];
+    int64_t pos = 0;
+    name.reset();
+    if (OB_ISNULL(suffix) || ai_column_name.empty()) {
+      ret = common::OB_INVALID_ARGUMENT;
+    } else if (OB_FAIL(databuff_printf(buf, sizeof(buf), pos, "__ai_%.*s%s",
+                                       ai_column_name.length(), ai_column_name.ptr(), suffix))) {
+    } else if (OB_FAIL(common::ob_write_string(allocator,
+                                              common::ObString(static_cast<int32_t>(pos), buf),
+                                              name))) {
+    }
+    return ret;
+  }
+
+  // true when %hidden_column_name is exactly "__ai_<ai_column_name><suffix>"
+  static bool is_hidden_column_of(const common::ObString &hidden_column_name,
+                                  const common::ObString &ai_column_name,
+                                  const char *suffix)
+  {
+    bool is_match = false;
+    if (OB_NOT_NULL(suffix) && !ai_column_name.empty()) {
+      char expected[common::OB_MAX_COLUMN_NAME_LENGTH];
+      int64_t pos = 0;
+      if (OB_SUCCESS == databuff_printf(expected, sizeof(expected), pos, "__ai_%.*s%s",
+                                        ai_column_name.length(), ai_column_name.ptr(), suffix)
+          && pos == hidden_column_name.length()) {
+        is_match = 0 == hidden_column_name.compare(common::ObString(static_cast<int32_t>(pos), expected));
+      }
+    }
+    return is_match;
+  }
+};
+
 const char *const STR_COLUMN_TYPE_INT = "int";
 const char *const STR_COLUMN_TYPE_UINT64 = "uint64";
 const char *const STR_COLUMN_TYPE_FLOAT = "float";
@@ -293,6 +345,10 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_domain_index_column() const { return is_vec_index_column() || is_fulltext_column() || is_multivalue_generated_column() || is_multivalue_generated_array_column(); }
   inline bool has_generated_column_deps() const { return column_flags_ & GENERATED_DEPS_CASCADE_FLAG; }
   inline bool is_invisible_column() const { return column_flags_ & INVISIBLE_COLUMN_FLAG; }
+  // true: the column is an AI COLUMN, its value is filled asynchronously by an AI model.
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline void set_is_ai_column(bool is_ai_column)
+  { is_ai_column ? add_column_flag(AI_COLUMN_FLAG) : del_column_flag(AI_COLUMN_FLAG); }
   inline bool has_column_flag(int64_t flag) const { return column_flags_ & flag; }
   inline int64_t get_column_flags() const { return column_flags_; }
   //these column flags must be stored in __all_column
