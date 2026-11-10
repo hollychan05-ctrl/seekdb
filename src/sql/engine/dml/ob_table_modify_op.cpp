@@ -1410,6 +1410,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                                table_name.length(), table_name.ptr()))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
+          LOG_INFO("[AI_COL_DBG] orphan delete", KR(ret), K(i), K(sql.string()));
           // 2) create (or refresh) the task of every clear AI COLUMN
           sql.reuse();
           if (OB_FAIL(ret)) {
@@ -1432,6 +1433,7 @@ int reconcile_ai_columns(ObTableModifyOp &op)
                                                info.column_name_.ptr()))) {
           } else if (OB_FAIL(op.execute_write(sql.ptr()))) {
           }
+          LOG_INFO("[AI_COL_DBG] task insert", KR(ret), K(i), K(sql.string()));
         }
       }
       int end_ret = op.end_nested_session();
