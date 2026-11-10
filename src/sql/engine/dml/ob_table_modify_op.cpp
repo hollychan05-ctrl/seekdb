@@ -1369,7 +1369,8 @@ int reconcile_ai_columns(ObTableModifyOp &op)
   if (AiReconcileGuard::in_guard_) {
     return OB_SUCCESS;
   }
-  AiReconcileGuard guard;
+  AiReconcileGuard reconcile_guard;
+  UNUSED(reconcile_guard);
   ObExecContext &ctx = op.get_exec_ctx();
   ObSqlCtx *sql_ctx = ctx.get_sql_ctx();
   ObSQLSessionInfo *session = ctx.get_my_session();
