@@ -823,6 +823,10 @@ const char *const AI_TASK_TNAME = "oceanbase.__all_ai_column_task";
 // task state machine
 const int64_t AI_TASK_PENDING = 0;
 const int64_t AI_TASK_RETRYING = 3;
+// Dynamic sampling is pointless for the tiny bookkeeping statements below and it
+// cannot estimate the un-analyzed tables inside a nested session, so it is
+// switched off explicitly.
+const char *const AI_NO_DS_HINT = "/*+ DYNAMIC_SAMPLING(0) */ ";
 
 int ai_append_identifier(ObSqlString &sql, const ObString &name)
 {
@@ -997,8 +1001,8 @@ int ObAiColumnWorker::load_tasks(ObArenaAllocator &allocator, ObIArray<AiColumnT
   if (OB_ISNULL(GCTX.sql_proxy_)) {
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(sql.append_fmt(
-               "SELECT table_id, column_id, request_id, rowkey_predicate, state, retry_count "
-               "FROM %s WHERE eligible_ts <= now(6) LIMIT 64", AI_TASK_TNAME))) {
+               "SELECT %s table_id, column_id, request_id, rowkey_predicate, state, retry_count "
+               "FROM %s WHERE eligible_ts <= now(6) LIMIT 64", AI_NO_DS_HINT, AI_TASK_TNAME))) {
   } else {
     SMART_VAR(ObMySQLProxy::MySQLResult, res) {
       ObMySQLResult *result_set = NULL;
@@ -1069,8 +1073,8 @@ int ObAiColumnWorker::drop_table_tasks(const uint64_t table_id)
   int64_t affected = 0;
   if (OB_ISNULL(GCTX.sql_proxy_)) {
     ret = OB_NOT_INIT;
-  } else if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu", AI_TASK_TNAME,
-                                    table_id))) {
+  } else if (OB_FAIL(sql.append_fmt("DELETE %sFROM %s WHERE table_id = %lu", AI_NO_DS_HINT,
+                                    AI_TASK_TNAME, table_id))) {
   } else if (OB_FAIL(GCTX.sql_proxy_->write(sql.ptr(), affected))) {
   }
   return ret;
@@ -1152,7 +1156,7 @@ int ObAiColumnWorker::evaluate_task(ObArenaAllocator &allocator,
     ret = OB_NOT_INIT;
   } else if (info.prompt_.empty()) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(sql.append_fmt("SELECT %.*s FROM `%.*s`.`%.*s` WHERE ",
+  } else if (OB_FAIL(sql.append_fmt("SELECT %s%.*s FROM `%.*s`.`%.*s` WHERE ", AI_NO_DS_HINT,
                                     info.prompt_.length(), info.prompt_.ptr(),
                                     db.get_database_name_str().length(),
                                     db.get_database_name_str().ptr(),
@@ -1229,15 +1233,16 @@ int ObAiColumnWorker::publish_group(const ObTableSchema &table,
   } else {
     // Claim the group.  Only the worker whose request id is still stored in the
     // task rows may publish, so a result of a superseded request cannot win.
-    if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu AND rowkey_predicate = ",
-                               AI_TASK_TNAME, first.table_id_))
+    if (OB_FAIL(sql.append_fmt("DELETE %sFROM %s WHERE table_id = %lu AND rowkey_predicate = ",
+                               AI_NO_DS_HINT, AI_TASK_TNAME, first.table_id_))
         || OB_FAIL(ai_append_sql_string(sql, first.rowkey_predicate_))
         || OB_FAIL(sql.append(" AND request_id = "))
         || OB_FAIL(ai_append_sql_string(sql, first.request_id_))) {
     } else if (OB_FAIL(trans.write(sql.ptr(), affected))) {
     } else if (affected > 0) {
       sql.reuse();
-      if (OB_FAIL(sql.append_fmt("UPDATE `%.*s`.`%.*s` SET ", db_name.length(), db_name.ptr(),
+      if (OB_FAIL(sql.append_fmt("UPDATE %s`%.*s`.`%.*s` SET ", AI_NO_DS_HINT,
+                                 db_name.length(), db_name.ptr(),
                                  table_name.length(), table_name.ptr()))) {
       }
     }
@@ -1288,10 +1293,10 @@ int ObAiColumnWorker::defer_or_drop_group(const ObTableSchema &table,
     } else if (OB_FAIL(trans.start(GCTX.sql_proxy_))) {
     } else {
       if (OB_FAIL(sql.append_fmt(
-            "UPDATE %s SET retry_count = retry_count + 1, state = %ld, "
+            "UPDATE %s%s SET retry_count = retry_count + 1, state = %ld, "
             "eligible_ts = date_add(now(6), interval 1 second) "
             "WHERE table_id = %lu AND column_id = %lu AND rowkey_predicate = ",
-            AI_TASK_TNAME, AI_TASK_RETRYING, task.table_id_, task.column_id_))
+            AI_NO_DS_HINT, AI_TASK_TNAME, AI_TASK_RETRYING, task.table_id_, task.column_id_))
           || OB_FAIL(ai_append_sql_string(sql, task.rowkey_predicate_))
           || OB_FAIL(sql.append(" AND request_id = "))
           || OB_FAIL(ai_append_sql_string(sql, task.request_id_))) {
@@ -1302,8 +1307,8 @@ int ObAiColumnWorker::defer_or_drop_group(const ObTableSchema &table,
         // and the AI COLUMN stays NULL ("failed")
         sql.reuse();
         if (OB_FAIL(sql.append_fmt(
-                     "DELETE FROM %s WHERE table_id = %lu AND column_id = %lu "
-                     "AND rowkey_predicate = ", AI_TASK_TNAME, task.table_id_,
+                     "DELETE %sFROM %s WHERE table_id = %lu AND column_id = %lu "
+                     "AND rowkey_predicate = ", AI_NO_DS_HINT, AI_TASK_TNAME, task.table_id_,
                      task.column_id_))
                    || OB_FAIL(ai_append_sql_string(sql, task.rowkey_predicate_))
                    || OB_FAIL(sql.append(" AND request_id = "))
@@ -1398,9 +1403,10 @@ int reconcile_ai_columns(ObTableModifyOp &op)
           ObSqlString sql;
           const ObAiColumnInfo &info = ai_columns.at(i);
           // 1) drop the tasks of rows that disappeared (DELETE and key UPDATE)
-          if (OB_FAIL(sql.append_fmt("DELETE FROM %s WHERE table_id = %lu AND column_id = %lu "
+          if (OB_FAIL(sql.append_fmt("DELETE %sFROM %s WHERE table_id = %lu AND column_id = %lu "
                                      "AND rowkey_predicate NOT IN (SELECT CONCAT(",
-                                     AI_TASK_TNAME, table_schema->get_table_id(),
+                                     AI_NO_DS_HINT, AI_TASK_TNAME,
+                                     table_schema->get_table_id(),
                                      info.column_id_))
                      || OB_FAIL(ai_append_sql_string(sql, rowkey_prefix.string()))
                      || OB_FAIL(sql.append_fmt(", `%.*s`) FROM `%.*s`.`%.*s`)",
@@ -1414,10 +1420,10 @@ int reconcile_ai_columns(ObTableModifyOp &op)
           // 2) create (or refresh) the task of every clear AI COLUMN
           sql.reuse();
           if (OB_FAIL(ret)) {
-          } else if (OB_FAIL(sql.append_fmt("REPLACE INTO %s "
+          } else if (OB_FAIL(sql.append_fmt("REPLACE %sINTO %s "
                                             "(table_id, column_id, request_id, rowkey_predicate, "
                                             "eligible_ts, state, retry_count) "
-                                            "SELECT %lu, %lu, ", AI_TASK_TNAME,
+                                            "SELECT %lu, %lu, ", AI_NO_DS_HINT, AI_TASK_TNAME,
                                             table_schema->get_table_id(), info.column_id_))
                      || OB_FAIL(ai_append_sql_string(sql, request_id))
                      || OB_FAIL(sql.append(", CONCAT("))
