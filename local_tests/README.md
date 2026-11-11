@@ -13,7 +13,28 @@ export MVD_BIN="$PWD/build/minivectordb"
 python3 local_tests/crash_test.py     # SIGKILL: committed survives, uncommitted rolls back, torn log
 python3 local_tests/harden_test.py    # invalid vectors, atomicity, recovery, large data, ann/index
 python3 local_tests/scale_test.py     # 10k x 128-dim load + TopK timing and peak RSS
+python3 local_tests/fuzz_test.py 150 1 2 3   # randomised differential test, seeds 1..3
 ```
+
+## `fuzz_test.py`
+
+Drives the database with a random workload (`CREATE TABLE`, multi-row `INSERT`,
+`UPDATE`/`DELETE` by condition, `SELECT` with `WHERE`/`ORDER BY`/`LIMIT`,
+`BEGIN`/`COMMIT`/`ROLLBACK`, interleaved clean restarts and SIGKILLs) and
+compares **every** answer against an independent Python model of the required
+semantics: int64 keys, code-point string order, ties broken by ascending
+primary key, filtered TopK computed inside the filtered set, and no partial
+effect from a failed statement.  It also re-reads the whole table after each
+restart.
+
+`LIMIT` without `ORDER BY` returns an unspecified subset, so the checker only
+requires the right count and membership there; everything else is exact.
+
+That division of labour matters: an earlier version of `ROLLBACK` dropped the
+pages the transaction had touched, which also discarded *previously committed*
+rows still sitting in the cache because they had not reached the heap file yet.
+The shipped public case `transaction_rollback` is what exposed it; the rollback
+now restores a pre-transaction image of every page instead.
 
 `MVD_DATA` overrides the data directory (default `/tmp/mvd-data`).
 
