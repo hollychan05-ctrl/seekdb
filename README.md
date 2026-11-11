@@ -54,7 +54,7 @@ Data lives in `/data`:
 | File | Purpose |
 | --- | --- |
 | `catalog.json` | checkpoint of the table definitions |
-| `t<oid>.dat` | slotted-page heap file, one per table (8 KiB pages) |
+| `t<oid>.dat` | slotted-page heap file, one per table (32 KiB pages) |
 | `wal.log` | redo log of committed page images plus a commit marker |
 
 A transaction keeps the pages it touched pinned in the page cache, so an
@@ -67,9 +67,28 @@ shutdown flushes the heaps, rewrites `catalog.json` and truncates the log.
 The page cache is bounded (96 MiB) and evicts least-recently-used pages, so
 scans and recovery do not depend on the whole data set fitting in memory.
 
+## Local validation
+
+`local_tests/` holds the tests used while developing.  They need only Python 3
+and the built binary (`MVD_BIN`, default `./build/minivectordb`):
+
+| Script | Covers |
+| --- | --- |
+| `harden_test.py` | the formal requirements the public package does not test: rejecting NaN/Infinity/wrong dimension/float32 overflow, statement atomicity, recovery (including a kill right after recovery), data larger than the page cache, and `ann`/index correctness |
+| `crash_test.py` | forced termination: committed survives, uncommitted rolls back, torn log tail is ignored |
+| `scale_test.py` | 10,000 x 128-dim load plus TopK timing and peak RSS |
+
+The public cases themselves run through the shipped checker:
+
+```bash
+python3 protocol_check/run.py --image "$VECTORDB_IMAGE" --output "protocol-results/public-$(date +%Y%m%d-%H%M%S)"
+```
+
 ## Known limits
 
 - Retrieval is an exact scan; `CREATE VECTOR INDEX` is recorded but no
   approximate index is maintained (exact results also satisfy `ann` recall).
 - No `NULL`, `JOIN`, aggregation, sub-queries, `ALTER TABLE`, or foreign keys.
+- Primary-key updates are rejected rather than applied.
+- A single row must fit one 32 KiB page.
 - Deleted rows leave holes; space is reused for same-page appends only.

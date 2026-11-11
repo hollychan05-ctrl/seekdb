@@ -92,7 +92,9 @@ bool parseSql(const std::string& sql, Stmt& out, std::string& err);
 
 // ------------------------------------------------------------------- storage
 
-constexpr uint32_t kPageSize = 8192;
+// 32 KiB keeps slot offsets inside the u16 slot directory while still holding
+// a row with a long VARCHAR, so a wide row cannot make a statement fail.
+constexpr uint32_t kPageSize = 32768;
 constexpr uint16_t kSlotFree = 0xFFFF;
 
 struct Rid {

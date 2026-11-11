@@ -832,6 +832,46 @@ struct Database::Impl {
     undo.clear();
   }
 
+  // Persists the table definitions.  Called at every checkpoint: both on a
+  // clean shutdown and right after recovery, because recovery truncates the
+  // log that carried the DDL records -- losing it here would drop tables if the
+  // process is killed again before the next clean shutdown.
+  void writeCatalog() {
+    JValue root = JValue::makeObj();
+    JValue tabs = JValue::makeArr();
+    for (auto& kv : tables) {
+      Table* t = kv.second.get();
+      JValue tv = JValue::makeObj();
+      tv.set("name", JValue::makeStr(t->name));
+      tv.set("oid", JValue::makeInt(t->oid));
+      JValue cols = JValue::makeArr();
+      for (const ColumnDef& c : t->columns) {
+        JValue cv = JValue::makeObj();
+        cv.set("name", JValue::makeStr(c.name));
+        cv.set("type", JValue::makeStr(typeName(c.type)));
+        cv.set("len", JValue::makeInt(c.len));
+        cv.set("pk", JValue::makeBool(c.primary));
+        cols.arr.push_back(std::move(cv));
+      }
+      tv.set("columns", std::move(cols));
+      tv.set("has_vector_index", JValue::makeBool(t->has_vector_index));
+      tv.set("vector_index", JValue::makeStr(t->vector_index_name));
+      tabs.arr.push_back(std::move(tv));
+    }
+    root.set("tables", std::move(tabs));
+    root.set("next_oid", JValue::makeInt(next_oid));
+    std::string text = dump(root);
+    std::string tmp = path("catalog.tmp");
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    if (f == nullptr) return;
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fflush(f);
+    ::fsync(fileno(f));
+    std::fclose(f);
+    std::rename(tmp.c_str(), path("catalog.json").c_str());
+    fsyncDir(dir);
+  }
+
   void dropFromCatalog(Table* t) {
     if (t == nullptr) return;
     by_oid.erase(t->oid);
@@ -1082,6 +1122,9 @@ std::string Database::open(const std::string& directory) {
       }
     });
   }
+  // The log was just truncated, so the checkpoint must be durable now: a kill
+  // between here and the next clean shutdown must not lose the recovered DDL.
+  d.writeCatalog();
   return std::string();
 }
 
@@ -1093,42 +1136,7 @@ void Database::close() {
   if (d.txn_active) d.txnRollback();
   d.flushAllDirty();
   // checkpoint: persist table definitions, then drop the log
-  {
-    JValue root = JValue::makeObj();
-    JValue tabs = JValue::makeArr();
-    for (auto& kv : d.tables) {
-      Table* t = kv.second.get();
-      JValue tv = JValue::makeObj();
-      tv.set("name", JValue::makeStr(t->name));
-      tv.set("oid", JValue::makeInt(t->oid));
-      JValue cols = JValue::makeArr();
-      for (const ColumnDef& c : t->columns) {
-        JValue cv = JValue::makeObj();
-        cv.set("name", JValue::makeStr(c.name));
-        cv.set("type", JValue::makeStr(typeName(c.type)));
-        cv.set("len", JValue::makeInt(c.len));
-        cv.set("pk", JValue::makeBool(c.primary));
-        cols.arr.push_back(std::move(cv));
-      }
-      tv.set("columns", std::move(cols));
-      tv.set("has_vector_index", JValue::makeBool(t->has_vector_index));
-      tv.set("vector_index", JValue::makeStr(t->vector_index_name));
-      tabs.arr.push_back(std::move(tv));
-    }
-    root.set("tables", std::move(tabs));
-    root.set("next_oid", JValue::makeInt(d.next_oid));
-    std::string text = dump(root);
-    std::string tmp = d.path("catalog.tmp");
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (f) {
-      std::fwrite(text.data(), 1, text.size(), f);
-      std::fflush(f);
-      ::fsync(fileno(f));
-      std::fclose(f);
-      std::rename(tmp.c_str(), d.path("catalog.json").c_str());
-      fsyncDir(d.dir);
-    }
-  }
+  d.writeCatalog();
   if (d.wal_fd >= 0) {
     ::ftruncate(d.wal_fd, 0);
     ::fsync(d.wal_fd);

@@ -447,6 +447,29 @@ class Parser {
     return true;
   }
 
+  // Reads an optionally signed numeric literal.  The magnitude is re-parsed
+  // from the token text with the sign attached, so INT64_MIN
+  // (-9223372036854775808) is not clamped by an intermediate unsigned parse.
+  bool parseSignedLiteral(Literal& lit) {
+    if (peek().kind == Tok::PUNCT && (peek().text == "-" || peek().text == "+")) {
+      bool neg = peek().text == "-";
+      advance();
+      if (peek().kind != Tok::NUMBER) return fail("expected number after sign");
+      const Token& t = peek();
+      if (t.num_is_double) {
+        lit.kind = Literal::VEC;
+        lit.v = {static_cast<float>(neg ? -t.dnum : t.dnum)};
+      } else {
+        std::string text = (neg ? "-" : "") + t.raw;
+        lit.kind = Literal::INT;
+        lit.i = static_cast<int64_t>(std::strtoll(text.c_str(), nullptr, 10));
+      }
+      advance();
+      return true;
+    }
+    return parseLiteral(lit);
+  }
+
   bool parseLiteral(Literal& lit) {
     const Token& t = peek();
     if (t.kind == Tok::NUMBER) {
@@ -543,20 +566,7 @@ class Parser {
       std::vector<Literal> row;
       for (;;) {
         Literal lit;
-        // Signed numeric literal, e.g. -3
-        if (peek().kind == Tok::PUNCT && (peek().text == "-" || peek().text == "+")) {
-          bool neg = peek().text == "-";
-          advance();
-          if (peek().kind != Tok::NUMBER) return fail("expected number after sign");
-          Literal inner;
-          inner.kind = Literal::INT;
-          inner.i = peek().num;
-          advance();
-          if (neg) inner.i = -inner.i;
-          lit = inner;
-        } else {
-          if (!parseLiteral(lit)) return false;
-        }
+        if (!parseSignedLiteral(lit)) return false;
         row.push_back(lit);
         if (peek().kind == Tok::PUNCT && peek().text == ",") {
           advance();
@@ -589,17 +599,7 @@ class Parser {
       else return fail("expected comparison operator");
       advance();
       Literal lit;
-      if (peek().kind == Tok::PUNCT && (peek().text == "-" || peek().text == "+")) {
-        bool neg = peek().text == "-";
-        advance();
-        if (peek().kind != Tok::NUMBER) return fail("expected number after sign");
-        lit.kind = Literal::INT;
-        lit.i = peek().num;
-        advance();
-        if (neg) lit.i = -lit.i;
-      } else if (!parseLiteral(lit)) {
-        return false;
-      }
+      if (!parseSignedLiteral(lit)) return false;
       cond.value = lit;
       out.where.push_back(cond);
       if (isKeyword(peek(), "and")) {
@@ -737,17 +737,7 @@ class Parser {
       if (!ident(a.column)) return false;
       if (peek().kind != Tok::EQ) return fail("expected '=' in SET");
       advance();
-      if (peek().kind == Tok::PUNCT && (peek().text == "-" || peek().text == "+")) {
-        bool neg = peek().text == "-";
-        advance();
-        if (peek().kind != Tok::NUMBER) return fail("expected number after sign");
-        a.value.kind = Literal::INT;
-        a.value.i = peek().num;
-        advance();
-        if (neg) a.value.i = -a.value.i;
-      } else if (!parseLiteral(a.value)) {
-        return false;
-      }
+      if (!parseSignedLiteral(a.value)) return false;
       out.assigns.push_back(std::move(a));
       if (peek().kind == Tok::PUNCT && peek().text == ",") {
         advance();
