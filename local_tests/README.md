@@ -14,7 +14,14 @@ python3 local_tests/crash_test.py     # SIGKILL: committed survives, uncommitted
 python3 local_tests/harden_test.py    # invalid vectors, atomicity, recovery, large data, ann/index
 python3 local_tests/scale_test.py     # 10k x 128-dim load + TopK timing and peak RSS
 python3 local_tests/fuzz_test.py 150 1 2 3   # randomised differential test, seeds 1..3
+python3 local_tests/mem_probe.py 400000      # peak RSS while the data dwarfs the cache
 ```
+
+`mem_probe.py` loads 400,000 rows of 128-dim vectors (~435 MiB on disk) and
+reports the child's real peak RSS (`VmHWM`) before shutdown: **122 MiB**, i.e.
+bounded and independent of the data size.  Note that
+`getrusage(RUSAGE_CHILDREN)` under-reports in this environment, which is why the
+probe reads `/proc/<pid>/status`.
 
 ## `fuzz_test.py`
 

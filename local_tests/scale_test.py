@@ -91,6 +91,15 @@ def main():
         total += len(r["rows"])
     t_query = time.time() - t0
 
+    peak_mb = 0.0
+    try:
+        with open(f"/proc/{p.p.pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    peak_mb = int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+
     # restart and confirm persistence
     p.shutdown()
     p = Proc(DATA)
@@ -101,13 +110,12 @@ def main():
     p.shutdown()
 
     size = sum(os.path.getsize(os.path.join(DATA, f)) for f in os.listdir(DATA))
-    peak_kb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
 
     print(f"rows                : {ROWS} x {DIM}-dim")
     print(f"write time          : {t_write:.2f}s  ({ROWS / t_write:.0f} rows/s)")
     print(f"query time          : {t_query:.2f}s  ({QUERIES / t_query:.0f} q/s, {total} rows)")
     print(f"data dir size       : {size / 1048576:.1f} MiB")
-    print(f"peak child RSS      : {peak_kb / 1024:.1f} MiB")
+    print(f"peak RSS (VmHWM)    : {peak_mb:.1f} MiB")
     print(f"persist after restart: first={ok_rows} last={ok_last}")
     return 0 if (ok_rows and ok_last) else 1
 

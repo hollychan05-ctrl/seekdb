@@ -85,6 +85,19 @@ def is_err(resp):
         and resp["error"]["code"] != ""
 
 
+def vmhwm(pid):
+    """Real peak RSS of the child.  getrusage(RUSAGE_CHILDREN) under-reports
+    here, so read /proc/<pid>/status while the process is still alive."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return 0.0
+
+
 def close(a, b, tol=1e-5):
     """Same semantics as the judge: floats compare with a tolerance, ints exactly."""
     if isinstance(a, float) or isinstance(b, float):
@@ -270,9 +283,8 @@ def test_large():
             return
     t_load = time.time() - t0
     size_mb = sum(os.path.getsize(os.path.join(DATA, f)) for f in os.listdir(DATA)) / 1048576
-    rss_mb = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024
-    check(f"loaded {rows} rows ({(rows * 0.5) / 1024:.0f} MiB of vectors) in {t_load:.1f}s",
-          True)
+    rss_mb = vmhwm(p.p.pid)
+    check(f"loaded {rows} rows ({size_mb:.0f} MiB on disk) in {t_load:.1f}s", True)
     r = p.sql("SELECT COUNT(*) FROM big;")
     # COUNT(*) is not part of the required SQL subset; fall back to a full scan
     r = p.sql("SELECT id FROM big WHERE s = 's0' ORDER BY id LIMIT 3;")

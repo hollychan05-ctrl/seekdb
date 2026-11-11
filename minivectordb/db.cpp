@@ -612,9 +612,10 @@ struct Database::Impl {
     return false;
   }
 
-  // Iterates every live row of a table.
+  // Iterates live rows until fn returns false.  fn must not touch the page
+  // cache: the page reference stays valid only for the duration of the call.
   template <typename Fn>
-  void scan(Table& t, Fn&& fn) {
+  void scanUntil(Table& t, Fn&& fn) {
     for (uint32_t p = 0; p < t.npages; ++p) {
       Page& page = loadPage(t, p, false);
       uint16_t ns = page.nslots();
@@ -622,9 +623,18 @@ struct Database::Impl {
         uint16_t off = 0, len = 0;
         page.slotAt(s, off, len);
         if (len == kSlotFree || len == 0) continue;
-        fn(Rid{p, s}, page.bytes.data() + off, len);
+        if (!fn(Rid{p, s}, page.bytes.data() + off, len)) return;
       }
     }
+  }
+
+  // Iterates every live row of a table.
+  template <typename Fn>
+  void scan(Table& t, Fn&& fn) {
+    scanUntil(t, [&](Rid rid, const uint8_t* data, uint16_t len) {
+      fn(rid, data, len);
+      return true;
+    });
   }
 
   bool insertRow(Table& t, const std::vector<Value>& vals, Rid& rid) {
@@ -1101,10 +1111,15 @@ std::string Database::open(const std::string& directory) {
     (void)clean;
   }
 
-  // after replay the heaps already hold every committed change: checkpoint now
+  // After replay the heaps already hold every committed change: checkpoint now.
+  // The catalog must reach the disk BEFORE the log is truncated -- if we die in
+  // between, the next start reloads the new catalog and simply replays the log
+  // again (the images are idempotent), whereas truncating first would throw away
+  // DDL records the catalog does not have yet.
   for (auto& kv : d.heap_fds) {
     if (kv.second >= 0) ::fsync(kv.second);
   }
+  d.writeCatalog();
   if (::ftruncate(d.wal_fd, 0) != 0) {
   }
   ::fsync(d.wal_fd);
@@ -1122,9 +1137,6 @@ std::string Database::open(const std::string& directory) {
       }
     });
   }
-  // The log was just truncated, so the checkpoint must be durable now: a kill
-  // between here and the next clean shutdown must not lose the recovered DDL.
-  d.writeCatalog();
   return std::string();
 }
 
@@ -1288,6 +1300,31 @@ ExecResult Database::execute(const std::string& sql, const std::string& search_m
         t->has_vector_index = true;
         t->vector_index_name = stmt.name;
       }
+    }
+  } else if (stmt.kind == Stmt::DROP_INDEX) {
+    Table* t = nullptr;
+    if (!stmt.table.empty()) {
+      t = d.findTable(stmt.table);
+    } else {
+      for (auto& kv : d.tables) {
+        if (kv.second->has_vector_index && kv.second->vector_index_name == stmt.name) {
+          t = kv.second.get();
+          break;
+        }
+      }
+      if (t == nullptr) t = d.findTable(stmt.name);
+    }
+    if (t == nullptr) {
+      Impl::setError(res, "no_such_table", "no table owns index: " + stmt.name);
+      failed = true;
+    } else {
+      Impl::Undo u;
+      u.kind = Impl::Undo::VINDEX_SET;
+      u.table = t->name;
+      u.flag = t->has_vector_index;
+      d.undo.push_back(std::move(u));
+      t->has_vector_index = false;
+      t->vector_index_name.clear();
     }
   } else if (stmt.kind == Stmt::INSERT) {
     Table* t = d.findTable(stmt.table);
@@ -1606,11 +1643,33 @@ ExecResult Database::execute(const std::string& sql, const std::string& search_m
           std::vector<SortKey> orderKeys;
           int64_t pk = 0;
         };
+        // A LIMIT must not force the whole table into memory: keep at most
+        // offset+limit candidates, and stop the scan early when there is no
+        // ORDER BY (which rows come back is unspecified then anyway).
+        const bool has_order = !orderRefs.empty();
+        const size_t cap = stmt.has_limit
+                               ? static_cast<size_t>(std::max<int64_t>(0, stmt.offset)) +
+                                     static_cast<size_t>(std::max<int64_t>(0, stmt.limit))
+                               : 0;
+        const bool bounded = stmt.has_limit;
+        const bool early_stop = bounded && !has_order;
         std::vector<RowOut> out;
-        d.scan(*t, [&](Rid rid, const uint8_t* data, uint16_t len) {
+        if (bounded) out.reserve(std::min<size_t>(cap, 4096));
+
+        auto compareOrder = [&](const RowOut& a, const RowOut& b) -> int {
+          for (size_t i = 0; i < orderRefs.size(); ++i) {
+            int c = compareKeys(a.orderKeys[i], b.orderKeys[i]);
+            if (orderRefs[i].desc) c = -c;
+            if (c != 0) return c;
+          }
+          if (a.pk != b.pk) return a.pk < b.pk ? -1 : 1;
+          return 0;
+        };
+
+        d.scanUntil(*t, [&](Rid /*rid*/, const uint8_t* data, uint16_t len) {
           std::vector<Value> vals;
-          if (!decodeRow(*t, data, len, vals)) return;
-          if (!d.rowMatches(*t, vals, stmt.where)) return;
+          if (!decodeRow(*t, data, len, vals)) return true;
+          if (!d.rowMatches(*t, vals, stmt.where)) return true;
           RowOut ro;
           for (const OutItem& item : outItems) {
             JValue cell;
@@ -1666,23 +1725,28 @@ ExecResult Database::execute(const std::string& sql, const std::string& search_m
           }
           if (t->pk_index >= 0) ro.pk = vals[t->pk_index].i;
           out.push_back(std::move(ro));
-        });
-        if (!orderRefs.empty()) {
-          std::stable_sort(out.begin(), out.end(), [&](const RowOut& a, const RowOut& b) {
-            for (size_t i = 0; i < orderRefs.size(); ++i) {
-              int c = compareKeys(a.orderKeys[i], b.orderKeys[i]);
-              if (orderRefs[i].desc) c = -c;
-              if (c != 0) return c < 0;
+          if (bounded && out.size() > cap) {
+            if (has_order) {
+              size_t worst = 0;  // the candidate that sorts last
+              for (size_t i = 1; i < out.size(); ++i) {
+                if (compareOrder(out[worst], out[i]) < 0) worst = i;
+              }
+              out.erase(out.begin() + worst);
+            } else {
+              out.pop_back();
             }
-            if (a.pk != b.pk) return a.pk < b.pk;
-            return false;
-          });
+          }
+          return !(early_stop && out.size() >= cap);
+        });
+        if (has_order && out.size() > 1) {
+          std::stable_sort(out.begin(), out.end(),
+                           [&](const RowOut& a, const RowOut& b) { return compareOrder(a, b) < 0; });
         }
         if (stmt.has_limit) {
-          size_t begin = static_cast<size_t>(std::max<int64_t>(0, stmt.offset));
-          size_t end = begin + static_cast<size_t>(std::max<int64_t>(0, stmt.limit));
-          if (begin > out.size()) begin = out.size();
-          if (end > out.size()) end = out.size();
+          size_t begin = std::min<size_t>(
+              static_cast<size_t>(std::max<int64_t>(0, stmt.offset)), out.size());
+          size_t end = std::min<size_t>(
+              begin + static_cast<size_t>(std::max<int64_t>(0, stmt.limit)), out.size());
           std::vector<RowOut> sliced(out.begin() + begin, out.begin() + end);
           out = std::move(sliced);
         }

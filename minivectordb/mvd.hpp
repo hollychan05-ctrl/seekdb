@@ -57,6 +57,7 @@ struct Stmt {
   enum Kind {
     CREATE_TABLE,
     CREATE_VECTOR_INDEX,
+    DROP_INDEX,
     DROP_TABLE,
     INSERT,
     SELECT,

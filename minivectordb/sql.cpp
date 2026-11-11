@@ -4,6 +4,7 @@
 #include "mvd.hpp"
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -525,6 +526,9 @@ class Parser {
           v = t.num_is_double ? t.dnum : static_cast<double>(t.num);
           advance();
         }
+        if (!std::isfinite(v) || std::fabs(v) > 3.4028234663852886e38) {
+          return fail("vector element is not a finite float32");
+        }
         lit.v.push_back(static_cast<float>(v));
       } else {
         return fail("expected number in vector literal");
@@ -767,6 +771,22 @@ class Parser {
 
   bool parseDrop(Stmt& out) {
     advance();  // drop
+    if (isKeyword(peek(), "index") || isKeyword(peek(), "vector")) {
+      // DROP [VECTOR] INDEX name [ON table]
+      if (isKeyword(peek(), "vector")) advance();
+      if (!isKeyword(peek(), "index")) {
+        out.kind = Stmt::UNSUPPORTED;
+        return true;
+      }
+      advance();
+      out.kind = Stmt::DROP_INDEX;
+      if (!ident(out.name)) return false;
+      if (isKeyword(peek(), "on")) {
+        advance();
+        if (!ident(out.table)) return false;
+      }
+      return true;
+    }
     if (!isKeyword(peek(), "table")) {
       out.kind = Stmt::UNSUPPORTED;
       return true;
