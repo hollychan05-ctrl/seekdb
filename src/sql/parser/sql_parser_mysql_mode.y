@@ -49,8 +49,10 @@
   if (0 != display_type) { \
     malloc_terminal_node(display_node, result->malloc_pool_, display_type); \
   } \
-  if (NULL != (no_use)) { \
-    /* describe_or_desc select: report the columns, do not plan the query */ \
+  if (NULL != (no_use) && NULL != (stmt) && T_SELECT == (stmt)->type_) { \
+    /* DESCRIBE/DESC <select>: report the columns, do not plan the query.
+     * DESCRIBE/DESC of anything else (insert/update/delete) is a synonym for
+     * EXPLAIN, so it must keep the T_EXPLAIN shape. */ \
     malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_DESCRIBE_SELECT, 1, (stmt)); \
   } else { \
     malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
